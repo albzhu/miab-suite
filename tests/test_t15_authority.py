@@ -151,3 +151,36 @@ def test_an_authorised_call_records_no_override(run_cb, claw_home):
     run_cb("return", "--id", cid, "--from", "coder", "--result", "done")
     run_cb("resolve", "--id", cid, "--from", "main")
     assert not [e for e in ledger_events(claw_home, cid) if e["event"] == "authority-override"]
+
+
+# ------------------------------------------------- aliases must not defeat authority
+def test_an_alias_addressed_forward_records_the_canonical_holder(run_cb, claw_home):
+    """Regression, found by a live smoke test: `forward --to ECHO` used to record the
+    *alias* as holder, so the agent — which identifies as `reviewer` — was then
+    refused its own `return`. T14's alias feature would have reintroduced exactly the
+    routing failure T15 exists to stop."""
+    run_cb("register", "--agent", "reviewer", "--agent-id", "agent:reviewer", "--alias", "ECHO")
+    cid = make(run_cb, "main", "coder")
+    assert run_cb("forward", "--id", cid, "--from", "coder", "--to", "ECHO",
+                  "--summary", "review").returncode == 0
+    env = json.loads((claw_home / "state" / "callbacks" / f"{cid}.json").read_text())
+    assert env["holder"] == "reviewer"
+    assert run_cb("return", "--id", cid, "--from", "reviewer", "--result", "lgtm").returncode == 0
+
+
+def test_authority_resolves_an_alias_recorded_on_a_pre_migration_envelope(run_cb, claw_home):
+    """An envelope written before the registry was migrated holds `echo` as holder.
+    The agent now known canonically as `reviewer` must still be able to act on it."""
+    cid = make(run_cb, "main", "echo")            # written while nothing was registered
+    run_cb("register", "--agent", "reviewer", "--agent-id", "agent:reviewer", "--alias", "echo")
+    r = run_cb("return", "--id", cid, "--from", "reviewer", "--result", "x")
+    assert r.returncode == 0, r.stderr
+    assert not [e for e in ledger_events(claw_home, cid) if e["event"] == "authority-override"]
+
+
+def test_cycle_detection_sees_through_aliases(run_cb):
+    run_cb("register", "--agent", "reviewer", "--agent-id", "agent:reviewer", "--alias", "ECHO")
+    cid = make(run_cb, "main", "reviewer")
+    r = run_cb("forward", "--id", cid, "--from", "reviewer", "--to", "ECHO", "--summary", "s")
+    assert r.returncode != 0
+    assert "cannot forward to itself" in err(r)

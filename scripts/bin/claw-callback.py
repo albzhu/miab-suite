@@ -175,6 +175,20 @@ def lookup_agent(logical_name: str) -> Optional[dict]:
     return resolve_agent(logical_name)[1]
 
 
+def agent_key(name) -> str:
+    """The name to *record* on an envelope for `name`. (T14)
+
+    Registry-aware, unlike bare canon(): an agent addressed by an alias must be
+    recorded under its canonical registry key, or the envelope says `echo` while the
+    agent identifies as `reviewer` and every later authority check refuses it — the
+    exact failure T15 exists to prevent, reintroduced by the alias feature.
+
+    Falls back to the plain canonical form for agents nobody has registered.
+    """
+    key, _ = resolve_agent(name)
+    return key or canon(name)
+
+
 def display_name(logical_name: str, reg: Optional[dict] = None) -> str:
     """Human-facing name for an agent: registry displayName, else the canonical key,
     else whatever we were given. Read by the interagent-queue observer. (T14 / Q9)"""
@@ -205,7 +219,7 @@ def require_authority(env: dict, actor: str, expected: str, role: str,
     envelope recorded `reviewer` is the same agent, and rejecting it would be a
     regression rather than a control.
     """
-    if canon(actor) == canon(expected):
+    if agent_key(actor) == agent_key(expected):
         return False
     if force:
         return True
@@ -578,7 +592,7 @@ def cmd_wake(args):
             "ok": True,
             "id": args.id,
             "wake_agent": resolved_name or target_name,
-            **({"requested_agent": target_name} if canon(target_name) != canon(resolved_name) else {}),
+            **({"requested_agent": target_name} if canon(target_name) != canon(resolved_name or target_name) else {}),
             "agentId": agent_id,
             **({"sessionKey": session_key} if session_key else {}),
             "dispatch_message": msg,
@@ -614,11 +628,11 @@ def cmd_create(args):
         "version": VERSION,
         "status": "pending",
         "task": args.task,
-        "createdBy": canon(args.frm),
-        "holder": canon(args.to),
+        "createdBy": agent_key(args.frm),
+        "holder": agent_key(args.to),
         "createdAt": now_iso(),
         "updatedAt": now_iso(),
-        "stack": [{"agent": canon(args.frm), "resume": resume, "pushedAt": now_iso()}],
+        "stack": [{"agent": agent_key(args.frm), "resume": resume, "pushedAt": now_iso()}],
         "active": None,
         "results": [],
         "history": [{"at": now_iso(), "agent": args.frm, "action": "create",
@@ -655,19 +669,19 @@ def cmd_forward(args):
         die(f"forward refused: callback {args.id} already has {depth} frames on the "
             f"stack (MAX_STACK_DEPTH={MAX_STACK_DEPTH}). This is almost always a "
             f"delegation loop. Pass --allow-cycle to override.")
-    waiting = [canon(f["agent"]) for f in env.get("stack", [])]
+    waiting = [agent_key(f["agent"]) for f in env.get("stack", [])]
     if not args.allow_cycle:
-        if canon(args.to) == canon(args.frm):
+        if agent_key(args.to) == agent_key(args.frm):
             die(f"forward refused: '{args.frm}' cannot forward to itself. "
                 f"Pass --allow-cycle if this is deliberate.")
-        if canon(args.to) in waiting:
+        if agent_key(args.to) in waiting:
             die(f"forward refused: '{args.to}' is already waiting on this callback "
                 f"(stack: {', '.join(waiting)}); forwarding to them would deadlock the "
                 f"chain. Pass --allow-cycle to override.")
 
     resume = build_resume(args)
-    env["stack"].append({"agent": canon(args.frm), "resume": resume, "pushedAt": now_iso()})
-    env["holder"] = canon(args.to)
+    env["stack"].append({"agent": agent_key(args.frm), "resume": resume, "pushedAt": now_iso()})
+    env["holder"] = agent_key(args.to)
     env["history"].append({"at": now_iso(), "agent": args.frm, "action": "forward",
                            "detail": f"delegate -> {args.to}"})
     save(env)
@@ -702,7 +716,7 @@ def cmd_return(args):
         die(f"callback {args.id} has an empty stack; nothing to wake. Run resolve instead.")
     frame = env["stack"].pop()
     env["active"] = frame
-    env["holder"] = canon(frame["agent"])
+    env["holder"] = agent_key(frame["agent"])
     terminal = len(env["stack"]) == 0
     env["history"].append({"at": now_iso(), "agent": args.frm, "action": "return",
                            "detail": f"wake -> {frame['agent']}" + (" (origin)" if terminal else "")})
