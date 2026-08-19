@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-VERSION = "1.3.0"   # string semver, matching CHANGELOG.md — not a float
+VERSION = "2.0.0"   # string semver, matching CHANGELOG.md — not a float
 
 # Script identity, used to make every emitted command copy-pasteable from any cwd. (T2)
 SELF = Path(__file__).resolve()
@@ -53,6 +53,25 @@ def self_cmd(rest: str) -> str:
 # 6 hex chars. Anything else is either a mistake or an attempted path-traversal
 # payload arriving via agent-generated `callback://<id>` text. (T1 / S0)
 ID_RE = re.compile(r"^cb-\d{14}-[0-9a-f]{6}$")
+
+# Routing agentIds are opaque to us, but every one the reference deployment uses has
+# the form `agent:<slug>`. A bare `planner` (no prefix) is almost always a paste of a
+# logical name into the wrong flag, and it routes to nothing. We warn rather than
+# refuse: existing registries contain such entries and refusing would strand them. (T14)
+AGENT_ID_RE = re.compile(r"^agent:[a-z0-9_-]+$")
+
+# A delegation chain deeper than this is a runaway, not a plan. (T12)
+MAX_STACK_DEPTH = 8
+
+
+def canon(name) -> str:
+    """Canonical form of a logical agent name.
+
+    The registry was exact-match and case-sensitive, so `ECHO`, `echo` and `Echo`
+    were three different agents — one registered, two silent misses that fell to
+    the unregistered-agent path. Canonicalise on the way in and on the way out. (T14)
+    """
+    return str(name or "").strip().casefold()
 
 
 # --------------------------------------------------------------------------- paths
@@ -128,10 +147,41 @@ def save_registry(reg: dict) -> None:
     tmp.replace(p)
 
 
+def registry_index(reg: Optional[dict] = None) -> dict:
+    """Map every canonical name — registry key or alias — to (key, entry). (T14)
+
+    Exact keys win over aliases, so an agent registered under its own name is never
+    shadowed by another agent claiming it as an alias.
+    """
+    reg = reg if reg is not None else load_registry()
+    agents = reg.get("agents", {})
+    idx = {}
+    for key, entry in agents.items():
+        for a in entry.get("aliases", []):
+            idx.setdefault(canon(a), (key, entry))
+    for key, entry in agents.items():
+        idx[canon(key)] = (key, entry)       # exact keys overwrite alias claims
+    return idx
+
+
+def resolve_agent(logical_name: str, reg: Optional[dict] = None):
+    """(canonical_key, entry) for a name given in any registered spelling, or (None, None)."""
+    hit = registry_index(reg).get(canon(logical_name))
+    return hit if hit else (None, None)
+
+
 def lookup_agent(logical_name: str) -> Optional[dict]:
     """Return the registry entry for a logical agent name, or None if not found."""
-    reg = load_registry()
-    return reg.get("agents", {}).get(logical_name)
+    return resolve_agent(logical_name)[1]
+
+
+def display_name(logical_name: str, reg: Optional[dict] = None) -> str:
+    """Human-facing name for an agent: registry displayName, else the canonical key,
+    else whatever we were given. Read by the interagent-queue observer. (T14 / Q9)"""
+    key, entry = resolve_agent(logical_name, reg)
+    if entry and entry.get("displayName"):
+        return entry["displayName"]
+    return key or str(logical_name)
 
 
 def wake_route(entry: dict) -> str:
@@ -142,6 +192,26 @@ def wake_route(entry: dict) -> str:
                 f"message=<dispatch_message above>). Then END YOUR TURN.")
     return (f"Call the cron tool with: action=wake, agentId='{entry['agentId']}', "
             f"text=<dispatch_message above>. Then END YOUR TURN.")
+
+
+def require_authority(env: dict, actor: str, expected: str, role: str,
+                      action: str, force: bool) -> bool:
+    """Enforce that `actor` is the agent entitled to take `action` on this bottle. (T15)
+
+    Returns True when the check was overridden with --force, so the caller can record
+    an `authority-override` ledger event. Refuses (fail-closed, non-zero) otherwise.
+
+    Comparison is on canonical names (T14): an agent that returns as `ECHO` when the
+    envelope recorded `reviewer` is the same agent, and rejecting it would be a
+    regression rather than a control.
+    """
+    if canon(actor) == canon(expected):
+        return False
+    if force:
+        return True
+    die(f"{action} refused: --from '{actor}' is not the {role} of {env['id']} "
+        f"(that is '{expected}'). If this is deliberate, re-run with --force; the "
+        f"override is recorded in the ledger.")
 
 
 def validate_id(cid: str) -> str:
@@ -382,27 +452,94 @@ def wake_message(cid: str, target: str, resume: dict, results: list, terminal: b
 
 # --------------------------------------------------------------------------- commands
 def cmd_register(args):
-    """Register or update an agent's routing info in the registry."""
+    """Register or update an agent's routing info in the registry. (T14)"""
     reg = load_registry()
     agents = reg.setdefault("agents", {})
-    entry = agents.get(args.agent, {})
+    key = canon(args.agent)
+    warnings = []
+
+    # Migrate a differently-cased duplicate of this agent onto the canonical key
+    # rather than leaving two entries to drift apart.
+    for existing in [k for k in agents if k != key and canon(k) == key]:
+        merged = agents.pop(existing)
+        merged.update(agents.get(key, {}))
+        agents[key] = merged
+        warnings.append(f"merged duplicate registry entry '{existing}' into '{key}'")
+
+    entry = agents.get(key, {})
     entry["agentId"] = args.agent_id
+    if not AGENT_ID_RE.match(args.agent_id):
+        warnings.append(
+            f"agentId '{args.agent_id}' does not look like a routing id (expected "
+            f"'agent:<slug>'). Wakes for '{key}' will be dispatched to it verbatim and "
+            f"will silently go nowhere if it is not a real routing id.")
     if args.session_key:
         entry["sessionKey"] = args.session_key
+    if args.display_name:
+        entry["displayName"] = args.display_name
     if args.description:
         entry["description"] = args.description
+
+    if args.alias:
+        idx = registry_index(reg)
+        aliases = list(entry.get("aliases", []))
+        for raw in args.alias:
+            a = canon(raw)
+            if not a:
+                continue
+            if a == key or a in {canon(x) for x in aliases}:
+                continue
+            # Compare canonically: a legacy registry holds the key `ECHO`, and the
+            # alias being added is `echo`. Those are the same entry.
+            dup_key = next((k for k in agents if canon(k) == a), None)
+            if dup_key is not None:
+                # A duplicate entry pointing at the same routing id is the thing an
+                # alias is meant to replace — absorb it. Anything else is a genuine
+                # collision between two agents and stays refused. (T14 migration)
+                dup = agents[dup_key]
+                if dup.get("agentId") != entry["agentId"]:
+                    die(f"alias '{raw}' is already a registered agent, and its agentId "
+                        f"({dup.get('agentId')!r}) differs from '{key}'s ({entry['agentId']!r}). "
+                        f"If they are the same agent, re-register '{raw}' with the correct "
+                        f"agentId first; if they are not, pick a different alias.")
+                agents.pop(dup_key)
+                for field in ("sessionKey", "displayName", "description"):
+                    if field in dup and field not in entry:
+                        entry[field] = dup[field]
+                for inherited in dup.get("aliases", []):
+                    if canon(inherited) not in {canon(x) for x in aliases} and canon(inherited) != key:
+                        aliases.append(canon(inherited))
+                warnings.append(
+                    f"absorbed duplicate agent '{raw}' (same agentId "
+                    f"{entry['agentId']}) into '{key}' as an alias")
+                aliases.append(a)
+                idx = registry_index(reg)   # the absorbed entry is gone; re-index
+                continue
+            owner = idx.get(a)
+            if owner and canon(owner[0]) != key:
+                die(f"alias '{raw}' already resolves to agent '{owner[0]}'; "
+                    f"refusing to point one name at two agents")
+            aliases.append(a)
+        entry["aliases"] = aliases
+
     entry["updatedAt"] = now_iso()
-    agents[args.agent] = entry
+    agents[key] = entry
     save_registry(reg)
+
     route = (f"sessions_send(sessionKey='{args.session_key}')" if args.session_key
              else f"cron(action=wake, agentId='{args.agent_id}')")
+    known = ", ".join([key] + list(entry.get("aliases", [])))
     emit({
         "ok": True,
-        "agent": args.agent,
+        "agent": key,
         "agentId": args.agent_id,
+        **({"aliases": entry["aliases"]} if entry.get("aliases") else {}),
+        **({"displayName": entry["displayName"]} if entry.get("displayName") else {}),
         **({"sessionKey": args.session_key} if args.session_key else {}),
-        "next_step": (f"Agent '{args.agent}' registered with agentId '{args.agent_id}'"
+        **({"warnings": warnings} if warnings else {}),
+        "next_step": (f"Agent '{key}' registered with agentId '{args.agent_id}'"
                       + (f" and sessionKey '{args.session_key}'" if args.session_key else "") + ". "
+                      f"Recognised names (case-insensitive): {known}. "
                       f"Future `return` and `wake` calls targeting this agent will use {route}."),
     })
 
@@ -416,7 +553,7 @@ def cmd_wake(args):
     if not target_name:
         die(f"Cannot determine wake target: no --to and no holder in envelope {args.id}")
 
-    entry = lookup_agent(target_name)
+    resolved_name, entry = resolve_agent(target_name)
 
     # Build the dispatch message (either from envelope's active frame or a fresh prompt)
     active = env.get("active")
@@ -440,7 +577,8 @@ def cmd_wake(args):
         emit({
             "ok": True,
             "id": args.id,
-            "wake_agent": target_name,
+            "wake_agent": resolved_name or target_name,
+            **({"requested_agent": target_name} if canon(target_name) != canon(resolved_name) else {}),
             "agentId": agent_id,
             **({"sessionKey": session_key} if session_key else {}),
             "dispatch_message": msg,
@@ -476,11 +614,11 @@ def cmd_create(args):
         "version": VERSION,
         "status": "pending",
         "task": args.task,
-        "createdBy": args.frm,
-        "holder": args.to,
+        "createdBy": canon(args.frm),
+        "holder": canon(args.to),
         "createdAt": now_iso(),
         "updatedAt": now_iso(),
-        "stack": [{"agent": args.frm, "resume": resume, "pushedAt": now_iso()}],
+        "stack": [{"agent": canon(args.frm), "resume": resume, "pushedAt": now_iso()}],
         "active": None,
         "results": [],
         "history": [{"at": now_iso(), "agent": args.frm, "action": "create",
@@ -505,17 +643,38 @@ def cmd_forward(args):
     env = load(args.id)
     if env["status"] != "pending":
         die(f"callback {args.id} is {env['status']}, cannot forward")
-    if env["holder"] != args.frm:
-        # not fatal: log it, the holder may have changed legitimately
-        env["history"].append({"at": now_iso(), "agent": args.frm, "action": "forward-warn",
-                               "detail": f"forwarder {args.frm} != recorded holder {env['holder']}"})
+    prior_holder = env["holder"]
+    overridden = require_authority(env, args.frm, prior_holder, "current holder",
+                                   "forward", args.force)
+
+    # T12 — a chain deeper than MAX_STACK_DEPTH, or one that hands work back to an
+    # agent already waiting on it, is a runaway rather than a plan. Production has
+    # logged a self-forward; nothing complained and the envelope grew unbounded.
+    depth = len(env.get("stack", []))
+    if depth >= MAX_STACK_DEPTH and not args.allow_cycle:
+        die(f"forward refused: callback {args.id} already has {depth} frames on the "
+            f"stack (MAX_STACK_DEPTH={MAX_STACK_DEPTH}). This is almost always a "
+            f"delegation loop. Pass --allow-cycle to override.")
+    waiting = [canon(f["agent"]) for f in env.get("stack", [])]
+    if not args.allow_cycle:
+        if canon(args.to) == canon(args.frm):
+            die(f"forward refused: '{args.frm}' cannot forward to itself. "
+                f"Pass --allow-cycle if this is deliberate.")
+        if canon(args.to) in waiting:
+            die(f"forward refused: '{args.to}' is already waiting on this callback "
+                f"(stack: {', '.join(waiting)}); forwarding to them would deadlock the "
+                f"chain. Pass --allow-cycle to override.")
+
     resume = build_resume(args)
-    env["stack"].append({"agent": args.frm, "resume": resume, "pushedAt": now_iso()})
-    env["holder"] = args.to
+    env["stack"].append({"agent": canon(args.frm), "resume": resume, "pushedAt": now_iso()})
+    env["holder"] = canon(args.to)
     env["history"].append({"at": now_iso(), "agent": args.frm, "action": "forward",
                            "detail": f"delegate -> {args.to}"})
     save(env)
     ledger_append({"id": args.id, "event": "forward", "by": args.frm, "to": args.to})
+    if overridden:
+        ledger_append({"id": args.id, "event": "authority-override", "by": args.frm,
+                       "action": "forward", "expected": prior_holder})
     emit({
         "ok": True, "id": args.id, "ref": f"callback://{args.id}", "holder": args.to,
         "stack_depth": len(env["stack"]),
@@ -532,6 +691,9 @@ def cmd_return(args):
     env = load(args.id)
     if env["status"] != "pending":
         die(f"callback {args.id} is {env['status']}, cannot return")
+    prior_holder = env["holder"]
+    overridden = require_authority(env, args.frm, prior_holder, "current holder",
+                                   "return", args.force)
     env["results"].append({
         "from": args.frm, "result": args.result,
         "artifacts": list(args.artifact or []), "at": now_iso(),
@@ -540,12 +702,15 @@ def cmd_return(args):
         die(f"callback {args.id} has an empty stack; nothing to wake. Run resolve instead.")
     frame = env["stack"].pop()
     env["active"] = frame
-    env["holder"] = frame["agent"]
+    env["holder"] = canon(frame["agent"])
     terminal = len(env["stack"]) == 0
     env["history"].append({"at": now_iso(), "agent": args.frm, "action": "return",
                            "detail": f"wake -> {frame['agent']}" + (" (origin)" if terminal else "")})
     save(env)
     ledger_append({"id": args.id, "event": "return", "by": args.frm, "wake": frame["agent"]})
+    if overridden:
+        ledger_append({"id": args.id, "event": "authority-override", "by": args.frm,
+                       "action": "return", "expected": prior_holder})
 
     # Look up wake target in registry
     entry = lookup_agent(frame["agent"])
@@ -575,6 +740,18 @@ def cmd_return(args):
 
 def cmd_resolve(args):
     env = load(args.id)
+    overridden = require_authority(env, args.frm, env.get("createdBy"), "originator",
+                                   "resolve", args.force)
+    # The originator resolves once the chain has fully unwound. A non-empty stack means
+    # agents are still waiting to be woken — resolving here strands them silently. (T15)
+    remaining = env.get("stack", [])
+    if remaining and not args.force:
+        die(f"resolve refused: callback {args.id} still has {len(remaining)} frame(s) "
+            f"on the stack ({', '.join(f['agent'] for f in remaining)}) waiting to be "
+            f"woken. Unwind with `return`, or `cancel` the callback. Pass --force to "
+            f"resolve anyway; the override is recorded in the ledger.")
+    if remaining and args.force:
+        overridden = True
     if args.result:
         env["results"].append({"from": args.frm, "result": args.result,
                                "artifacts": [], "at": now_iso()})
@@ -585,6 +762,10 @@ def cmd_resolve(args):
         "task": env.get("task"), "hops": len(env.get("results", [])),
         "result": env["results"][-1]["result"] if env.get("results") else None,
     })
+    if overridden:
+        ledger_append({"id": args.id, "event": "authority-override", "by": args.frm,
+                       "action": "resolve", "expected": env.get("createdBy"),
+                       "stack_remaining": len(env.get("stack", []))})
     # cleanup-on-completion: delete the active envelope, keep the ledger line.
     cleaned = _purge(args.id, env)
     emit({"ok": True, "id": args.id, "status": "resolved", "cleaned_up": cleaned,
@@ -598,6 +779,8 @@ def cmd_cancel(args):
     env = load(args.id)
     if env["status"] != "pending":
         die(f"callback {args.id} is {env['status']}, cannot cancel")
+    overridden = require_authority(env, args.frm, env.get("createdBy"), "originator",
+                                   "cancel", args.force)
     env["status"] = "cancelled"
     env["history"].append({"at": now_iso(), "agent": args.frm, "action": "cancel",
                            "detail": args.reason or "Cancelled by user / system command"})
@@ -605,6 +788,9 @@ def cmd_cancel(args):
     # Save the updated status within the envelope context before move
     save(env)
     ledger_append({"id": args.id, "event": "cancel", "by": args.frm, "reason": args.reason or "no reason provided"})
+    if overridden:
+        ledger_append({"id": args.id, "event": "authority-override", "by": args.frm,
+                       "action": "cancel", "expected": env.get("createdBy")})
     
     # Move envelope context file to state/callbacks/archive/ for retrospective analysis
     arch_path = archive_path(args.id)   # T1 / S0: same containment guarantee as the hot dir
@@ -755,6 +941,12 @@ def main():
     f.add_argument("--id", required=True)
     f.add_argument("--from", dest="frm", required=True, help="your agent id (current holder)")
     f.add_argument("--to", required=True, help="agent id you are delegating to next")
+    f.add_argument("--force", action="store_true",
+                   help="forward even if you are not the recorded holder (T15); "
+                        "the override is recorded in the ledger")
+    f.add_argument("--allow-cycle", action="store_true", dest="allow_cycle",
+                   help="permit a self-forward, a forward to an agent already on the "
+                        f"stack, or a chain deeper than MAX_STACK_DEPTH (T12)")
     add_resume_flags(f)
     f.set_defaults(func=cmd_forward)
 
@@ -763,12 +955,18 @@ def main():
     r.add_argument("--from", dest="frm", required=True, help="your agent id (finishing holder)")
     r.add_argument("--result", required=True, help="what you produced / your answer")
     r.add_argument("--artifact", action="append", help="path/url of an output (repeatable)")
+    r.add_argument("--force", action="store_true",
+                   help="return even if you are not the current holder of this callback "
+                        "(T15); the override is recorded in the ledger")
     r.set_defaults(func=cmd_return)
 
     rs = sub.add_parser("resolve", help="origin completes the whole task; clean up")
     rs.add_argument("--id", required=True)
     rs.add_argument("--from", dest="frm", required=True, help="your agent id (the origin)")
     rs.add_argument("--result", help="optional final result note for the ledger")
+    rs.add_argument("--force", action="store_true",
+                   help="resolve even if you are not the originator of this callback "
+                        "(T15); the override is recorded in the ledger")
     rs.set_defaults(func=cmd_resolve)
 
     sh = sub.add_parser("show", help="print one envelope")
@@ -784,6 +982,9 @@ def main():
     cn.add_argument("--id", required=True, help="callback id")
     cn.add_argument("--from", dest="frm", required=True, help="your agent id")
     cn.add_argument("--reason", help="reason for cancellation")
+    cn.add_argument("--force", action="store_true",
+                   help="cancel even if you are not the originator of this callback "
+                        "(T15); the override is recorded in the ledger")
     cn.set_defaults(func=cmd_cancel)
 
     sw = sub.add_parser("sweep", help="find/fail stale orphaned callbacks")
@@ -800,6 +1001,12 @@ def main():
     reg_p.add_argument("--session-key", dest="session_key",
                        help="optional exact sessionKey to wake instead of the agent's default "
                             "lane (e.g. 'agent:main:discord:channel:<id>' to wake a chat session)")
+    reg_p.add_argument("--alias", action="append",
+                       help="another name this agent answers to, e.g. a persona name "
+                            "(repeatable). Lookups are case-insensitive. (T14)")
+    reg_p.add_argument("--display-name", dest="display_name",
+                       help="human-facing name for logs and chat output (e.g. 'ECHO (Reviewer)'). "
+                            "Read by the interagent-queue observer.")
     reg_p.add_argument("--description", help="human-readable description of this agent")
     reg_p.set_defaults(func=cmd_register)
 

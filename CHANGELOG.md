@@ -2,6 +2,86 @@
 
 All notable changes to the `miab-broker` skill are recorded here.
 
+## 2.0.0 — M3 "Trustworthy routing" (2026-08-19)
+
+Identity and authority milestone (T14, T15, T12 of the execution backlog, plus Q9 in the sibling
+`interagent-queue` skill).
+
+**This release is behaviour-breaking.** Calls that succeeded silently until now are refused. See
+"What will now fail" below before upgrading — on the reference deployment's ledger, 6 of 46
+historical bottles contain at least one call this release rejects.
+
+### Security
+
+- **[T15] `--from` is now checked against the envelope.** `forward` and `return` require the caller
+  to be the current `holder`; `resolve` requires the `createdBy` agent **and** an empty stack;
+  `cancel` requires `createdBy`. Previously `--from` was an unverified label that nothing compared
+  to anything — any caller could pop another agent's frame or close a chain it had no part in.
+  Observed live rather than theorised: in one bottle a reviewer returned work and then also
+  resolved a bottle the main agent had created, popping two frames for one review.
+
+  Every check accepts `--force`. The call proceeds and an `authority-override` ledger event records
+  the actor, the action, and the agent that was entitled to it. Forcing is sometimes correct — a
+  wedged holder that will never return — and is meant to be visible afterwards, not silent.
+
+  This is authorisation, not authentication: `--from` remains an unverified assertion, and a local
+  process that deliberately lies about its identity is still out of scope (T19).
+
+### Added
+
+- **[T14] Agent aliases, canonical names, and `agentId` validation.** Registry lookups were
+  exact-match and case-sensitive, so `ECHO`, `echo` and `reviewer` were three different agents —
+  one registered, two silent misses routed down the unregistered-agent path.
+  - Names are canonicalised (trimmed, case-folded) on write and on lookup. `--agent ECHO` stores
+    the key `echo`; re-registering over a legacy differently-cased key **merges** it rather than
+    adding a third entry, so hand-patched duplicates collapse as they are touched.
+  - `register --alias` (repeatable) records the other names an agent answers to. An alias may not
+    shadow another agent's own name, nor point at two agents; both are refused.
+  - `register --display-name` records the human-facing label. The `interagent-queue` observer now
+    reads it from here (Q9) instead of keeping a second copy that drifted.
+  - `--agent-id` is checked against `^agent:[a-z0-9_-]+$`. A non-matching value is still stored —
+    refusing would strand existing registries — but `register` returns a `warnings` array, because
+    a wake sent to a non-routing id fails silently.
+  - `createdBy`, `holder` and `stack[].agent` are stored canonically on the envelope.
+  - `wake` reports the canonical `wake_agent` it resolved to, plus `requested_agent` when the
+    caller used a different spelling.
+- **[T12] Depth and cycle guards on `forward`.** `MAX_STACK_DEPTH = 8`; forwarding to yourself or
+  to an agent already waiting on the stack is refused, since that agent is blocked on this very
+  bottle and would deadlock the chain. Previously 50 alternating forwards produced a 51-frame
+  envelope without complaint, and a self-forward was recorded live. `--allow-cycle` overrides both.
+- **`authority-override` ledger event**, and a renderer for it in `interagent-queue` (the coupling
+  rule: an event type without a renderer is invisible, not broken — as `corrupt` was in 1.2.0).
+- Tests: `test_t14_agent_identity.py`, `test_t15_authority.py`, `test_t12_depth_and_cycles.py`, and
+  four new cross-skill cases in `test_ledger_schema_compat.py`. 87 passed, 1 xfailed.
+
+### Changed
+
+- `VERSION` `1.3.0` → `2.0.0`.
+- `SKILL.md` gains **§4a Authority**, and §6 gains a row per new refusal.
+- **`interagent-queue`:** `who()` reads display names from `agent-registry.json`, falling back to
+  the built-in `AGENT_MAP` for unregistered agents, and matches case-insensitively — so a ledger
+  written as `ECHO` and one written as `echo` no longer render as two different agents (Q9).
+
+### What will now fail
+
+Anything relying on the old permissiveness. Concretely:
+
+| call | now |
+|---|---|
+| `forward`/`return` with a `--from` that isn't the recorded holder | refused; `--force` to proceed |
+| `resolve --from <not createdBy>` | refused; `--force` to proceed |
+| `resolve` while frames remain on the stack (`create` → `resolve` with nobody returning) | refused; `return` up the chain, `cancel`, or `--force` |
+| `cancel --from <not createdBy>` | refused; `--force` to proceed |
+| forwarding to yourself, or to an agent already on the stack | refused; `--allow-cycle` to proceed |
+| forwarding onto a stack already 8 frames deep | refused; `--allow-cycle` to proceed |
+| `register --alias X` where `X` is another agent's name or alias | refused, with no override |
+
+Registries written by earlier versions keep working unchanged: a legacy `ECHO` key still resolves
+for a call addressed to `echo`, so nothing needs migrating before upgrading. Migrating collapses
+the duplicates and is recommended — see `docs/miab-broker/M3-completion.md`.
+
+Envelopes written by 1.x load unchanged; no key was renamed or removed.
+
 ## 1.3.0 — M2 "Re-scan ready" (2026-08-19)
 
 Documentation and metadata milestone (tasks T8–T10 of the execution backlog), plus one additive

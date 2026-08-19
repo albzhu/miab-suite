@@ -95,7 +95,17 @@ python3 <miab-broker>/scripts/bin/claw-callback.py register --agent <name> --age
 
 Optional `--session-key` overrides the wake destination with an exact session (e.g. `agent:main:discord:channel:<id>`) so bottle completions land in a chat session instead of the agent's default lane. When set, `return`/`wake` emit `sessions_send(sessionKey=…)` instructions instead of `cron(action=wake, agentId=…)`.
 
-Lookup is exact-match: an agent that identifies itself by a persona name must be registered under that exact name, or `wake` and `return` will fall through to the registry-miss path.
+**Names are case-insensitive and may have aliases.** `--agent ECHO`, `--agent echo` and `--agent Echo` are one agent, stored under the canonical lowercase key. Use `--alias` (repeatable) to register the other names an agent answers to — typically its persona name — so a call addressed to any of them routes to the same entry instead of falling through to the registry-miss path:
+
+```bash
+python3 <miab-broker>/scripts/bin/claw-callback.py register \
+  --agent reviewer --agent-id agent:reviewer \
+  --alias ECHO --display-name "🥷👁️ ECHO (Reviewer)"
+```
+
+An alias may not shadow another agent's own name, and may not point at two agents — both are refused. `--display-name` is the human-facing label; the `interagent-queue` observer reads it from here rather than keeping its own copy.
+
+`--agent-id` is checked against `^agent:[a-z0-9_-]+$`. A value that doesn't match (a logical name pasted into the routing slot, say) is still stored — refusing would strand existing registries — but `register` returns a `warnings` array saying so, because wakes sent to a non-routing id go nowhere silently.
 
 ### b) `create` — enqueue a MIAB (first hop)
 
@@ -138,6 +148,13 @@ python3 <miab-broker>/scripts/bin/claw-callback.py forward \
 
 Same resume-context flags as `create`. After forwarding, dispatch onward (`wake`) and end your turn. The parent's frame is untouched underneath; it will be woken after yours pops.
 
+**Only the current holder may forward** (see §4a). Two chain shapes are refused outright:
+
+- **A cycle** — forwarding to yourself, or to an agent already waiting on the stack. That agent is blocked on this bottle; handing it the work deadlocks the chain.
+- **A runaway** — a stack already `MAX_STACK_DEPTH` (8) frames deep.
+
+Both are overridable with `--allow-cycle` when the shape is deliberate.
+
 ### e) `return` — complete and unwind up the stack
 
 When an agent finishes its part, it pops its frame and surfaces the next holder up the chain.
@@ -158,7 +175,9 @@ The origin agent, once the whole task is delivered to the user, tears the bottle
 python3 <miab-broker>/scripts/bin/claw-callback.py resolve --id cb-XXXX --from main [--result "..."]
 ```
 
-The envelope is deleted; a single summary line is retained in the ledger for audit. Only the root (`terminal: true`) should resolve.
+The envelope is deleted; a single summary line is retained in the ledger for audit.
+
+`resolve` requires **both** that `--from` is the bottle's `createdBy` **and** that the stack is empty — the chain has fully unwound and `return` reported `terminal: true`. A non-empty stack means agents are still waiting to be woken, and resolving strands them with no notification. Unwind with `return`, or `cancel` the bottle. `--force` overrides, and records why (§4a).
 
 ### g) `cancel` — abort an active stack
 
@@ -201,6 +220,7 @@ All broker state lives under `$CLAW_HOME/state/callbacks/` — `CLAW_HOME` defau
 | `agent-registry.json` | `register` | logical agent → routable `agentId` wake map |
 | `archive/<id>.json` | `cancel` | cancelled bottles, kept for post-mortem |
 | `archive/corrupt/<id>.json` | `list`/`sweep` | quarantined unreadable envelopes |
+| `archive/` (other files) | — | **not written by this skill.** Anything here that isn't `cb-*.json` was put there by something else; the broker neither reads nor removes it |
 | `$CLAW_HOME/logs/callback-reaper.log` | `reap-callbacks.sh` | reaper run log |
 
 Envelopes are **deleted on completion** (`resolve`/reaped) — only the one-line ledger summary persists.
@@ -210,11 +230,12 @@ Envelopes are **deleted on completion** (`resolve`/reaped) — only the one-line
 ```jsonc
 {
   "id":        "cb-20260801214133-9b06a0", // cb- + 14-digit UTC stamp + 6 hex
-  "version":   "1.3.0",
+  "version":   "2.0.0",
   "status":    "pending",                  // pending | resolved | cancelled | failed
   "task":      "…",                        // overall delegated work
   "createdBy": "main",                     // origin agent (the only valid resolver)
   "holder":    "planner",                  // who currently owns the work
+  // createdBy, holder and stack[].agent are stored canonically (lower-cased, trimmed)
   "createdAt": "2026-08-01T21:41:33Z",
   "updatedAt": "2026-08-01T22:14:12Z",
   "stack":  [ { "agent": "main", "resume": { … }, "pushedAt": "…" } ],  // LIFO, bottom-first
@@ -226,11 +247,31 @@ Envelopes are **deleted on completion** (`resolve`/reaped) — only the one-line
 
 A **resume** object accepts exactly four keys — `summary` (string), `steps` (list of strings), `expects` (string), `integrate` (string). Anything else is rejected.
 
-Ledger records are one JSON object per line: `{at, id, event, by, …}` where `event` is one of `create`, `forward`, `return`, `resolve`, `cancel`, `fail`, `corrupt`. The sibling `interagent-queue` skill parses this file — treat the field names as a compatibility contract.
+Ledger records are one JSON object per line: `{at, id, event, by, …}` where `event` is one of `create`, `forward`, `return`, `resolve`, `cancel`, `fail`, `corrupt`, `authority-override`. The sibling `interagent-queue` skill parses this file — treat the field names as a compatibility contract, and note that adding an event type without adding a renderer there makes it *invisible* rather than an error.
+
+`authority-override` records a call that the §4a rules would have refused and that was forced through: `{id, event: "authority-override", by, action, expected, stack_remaining?}`. It is written *in addition to* the normal event, never instead of it.
 
 ---
 
 ## 4. Security Model
+
+### 4a. Authority — who may do what to a bottle
+
+`--from` states who is acting. Each mutating command requires that the caller is the agent the envelope says is entitled to act:
+
+| command | requires | rationale |
+|---|---|---|
+| `forward` | `--from` == current `holder` | only whoever holds the work can delegate it onward |
+| `return` | `--from` == current `holder` | only the holder can pop the frame and wake the next agent |
+| `resolve` | `--from` == `createdBy` **and** an empty stack | the originator tears down, once the chain has unwound |
+| `cancel` | `--from` == `createdBy` | the originator aborts what it started |
+
+Comparison is on canonical names, so an agent that identifies as `ECHO` where the envelope recorded `reviewer` is recognised as the same agent (§2a).
+
+Every one of these accepts `--force`. The call then proceeds and an `authority-override` event is appended to the ledger naming the actor, the action, and the agent that was entitled to it. The override is loud and permanent by design: forcing is sometimes correct — a wedged holder that will never return — and should always be visible afterwards.
+
+**This is authorisation, not authentication.** `--from` is still an unverified assertion: any process that can run the CLI can claim to be any agent. What these rules stop is the accidental case — the misrouted `return`, the wrong agent resolving someone else's chain, the double-popped frame — which is what the ledger shows actually happening. They are not a defence against a local process that is deliberately lying about its identity; see "Known limitations" below.
+
 
 **Trust boundary.** The broker assumes every process that can read `$CLAW_HOME` is trusted. It is designed for a single-user host running one agent ensemble. It is **not** hardened for a shared or multi-tenant machine.
 
@@ -280,7 +321,13 @@ scripts/reap-callbacks.sh --dry-run       # report only, change nothing
 | `… has mode 0o755 (must not be group- or world-accessible)` | State root is too permissive | `chmod 700 $CLAW_HOME` |
 | `--resume-file … is outside CLAW_HOME` | Reading a resume object from an unconstrained path | Move it under `$CLAW_HOME`, or pass `--allow-outside` deliberately |
 | `resume context has unknown keys: [...]` | Resume object has keys beyond the permitted four | Use only `summary`, `steps`, `expects`, `integrate` |
-| `wake` exits non-zero, `registry_miss: true` | Target agent isn't registered under that exact name | `register` it, then retry — check for persona-vs-function name mismatch |
+| `wake` exits non-zero, `registry_miss: true` | Target agent isn't registered under any name it answers to | `register` it, or add the name it used with `register --alias` |
+| `forward refused: --from '…' is not the current holder` | An agent tried to delegate a bottle it doesn't hold | Check `show --id` for the real holder; `--force` if deliberate |
+| `resolve refused: … still has N frame(s) on the stack` | The chain hasn't unwound; agents are still waiting | `return` up the chain, or `cancel`; `--force` records an override |
+| `resolve refused: --from '…' is not the originator` | A mid-chain agent tried to close someone else's bottle | The `createdBy` agent resolves; `--force` if deliberate |
+| `forward refused: '…' cannot forward to itself` | Self-forward — usually a persona/function name confusion | Check the `--to`; `--allow-cycle` if genuinely intended |
+| `forward refused: … MAX_STACK_DEPTH=8` | Delegation chain has run away | Unwind it; `--allow-cycle` to override |
+| `register` returns `warnings: [… does not look like a routing id …]` | A logical name was passed to `--agent-id` | Pass the routable handle (`agent:<slug>`), not the nicename |
 | `callback … is resolved, cannot forward` | Bottle already terminal | Start a new bottle; terminal states are final |
 | `list` reports quarantined envelopes | An envelope was unreadable and moved to `archive/corrupt/` | Inspect it there; the `corrupt` ledger event records why |
 | Bottle sits `pending` far longer than expected | Wake never delivered, or holder never returned | `show --id` to see the holder, then re-`wake`; there is no automatic redelivery yet |
@@ -290,13 +337,13 @@ scripts/reap-callbacks.sh --dry-run       # report only, change nothing
 ## Quick Reference
 
 ```
-register  → enable an agent's wake path (once per agent)
+register  → enable an agent's wake path, + --alias / --display-name (once per agent)
 create    → push first resume frame, dispatch, END TURN          (caller)
 wake      → emit the exact cron dispatch call for a bottle       (after create/forward)
 forward   → stack frame on top, delegate onward, END TURN        (mid-chain holder)
 return    → pop frame, wake next holder up the stack             (finished holder)
-resolve   → tear down bottle at the origin                       (terminal root)
-cancel    → abort a pending stack, archive it for post-mortem    (any time)
+resolve   → tear down bottle at the origin, stack must be empty  (terminal root)
+cancel    → abort a pending stack, archive it for post-mortem    (originator)
 show      → reload one bottle's full context                     (woken agent, first call)
 list      → table of all in-flight bottles                       (operator)
 reap      → fail + clean stale/orphaned bottles                  (garbage collector)
