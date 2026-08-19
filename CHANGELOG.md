@@ -2,6 +2,82 @@
 
 All notable changes to the `miab-broker` skill are recorded here.
 
+## 1.3.0 — M2 "Re-scan ready" (2026-08-19)
+
+Documentation and metadata milestone (tasks T8–T10 of the execution backlog), plus one additive
+routing feature (T22). The release exists to make the skill's authority, security model, and full
+command surface explicit to operators and to ClawHub's scanners.
+
+The only behaviour change is `--session-key` (below). It is additive: a registry entry without a
+`sessionKey` produces byte-for-byte the same `wake`/`return` output as 1.2.1.
+
+### Added
+
+- **`register --session-key`, and `sessionKey`-aware wake routing** (T22). A registry entry may
+  now carry an exact `sessionKey` that overrides the agent's default wake lane, so a bottle
+  completion resurfaces in a specific chat session rather than the agent's background lane. When
+  an entry has one, `register`, `wake` and `return` emit
+  `sessions_send(sessionKey=…, message=…)` instead of `cron(action=wake, agentId=…, text=…)`, and
+  echo the key back as `sessionKey` / `wake_sessionKey` alongside the unchanged `agentId`.
+  Entries without a `sessionKey` are untouched — the `cron(...)` instruction and the output shape
+  are exactly as before. Routing is centralised in a single `wake_route()` helper so `wake` and
+  `return` cannot drift apart. Covered by `tests/test_t22_session_key.py`, which asserts both the
+  overridden and the unchanged path.
+
+- **Declared permissions in `SKILL.md` frontmatter** (T8). A `permissions:` block now states the
+  environment variables read (`CLAW_HOME`, `CALLBACK_TTL_MIN`), the exact file read/write globs,
+  and that the skill makes no network calls — addressing SkillSpector **LP3** (confidence 0.94),
+  which flagged that a skill enabling persistent state manipulation and wake-routing changes
+  declared only `name` and `description`. The declaration matches what the code already enforces
+  via path containment; it is a description of existing behaviour, not a new control.
+- **`wake` and `show` are documented** (T9). Both were entirely absent from §2 and the Quick
+  Reference despite `wake` being how dispatch actually happens — every other command's `next_step`
+  points at it. An agent reading only the skill would hand-roll the `cron` call and get the
+  `agentId` wrong.
+- **`§3` now documents the envelope schema** and the full file inventory, including the
+  `archive/` and `archive/corrupt/` trees added in 1.2.0, and notes the `ledger.jsonl` field names
+  as a compatibility contract with the sibling `interagent-queue` skill.
+- **New `§4 Security Model`** stating the trust boundary, what is enforced, and — explicitly —
+  what is not: unverified `--from`, no integrity/replay protection, no concurrency safety,
+  plaintext unbounded retention. Includes the instruction not to place secret values in
+  `--task`/`--summary`/`--result`, since those are persisted and copied into inter-agent
+  `dispatch_message` text.
+- **Agent-name key in `§1`.** The architecture diagram and the examples throughout use persona
+  names (LYRA, SPECTRE, Cinder, ECHO …) with no explanation of who they are or how they relate to
+  the functional ids (`main`, `planner`, `coder`, `reviewer` …) that the broker actually routes on.
+  Added a mapping table making the distinction explicit, noting the personas are illustrative
+  display names from the reference deployment rather than anything the skill requires, and that
+  `agent-registry.json` is the routing source of truth with exact-match lookup — the reason an
+  agent returning as `ECHO` rather than `reviewer` misses the registry.
+- **New `§6 Troubleshooting`** mapping every error introduced in 1.2.x to its cause and fix.
+  Behaviour changes such as strict id validation, `CLAW_HOME` ownership checks, and resume-file
+  containment were previously enforced but undocumented, so operators met them only as errors.
+- **`SECURITY.md`** (T10) with reporting instructions, trust boundary, enforced controls, known
+  limitations, and operator guidance.
+
+### Changed
+
+- `VERSION` `1.2.1` → `1.3.0`.
+- `tests/conftest.py` now sets `CLAW_NO_NOTIFY=1` in the subprocess environment. The suite resolves
+  around forty bottles per run; this guarantees no build of the CLI can turn that into outbound
+  messages on a developer machine that happens to have a sender on `PATH`.
+- §2's preamble rewritten — the previous version was a 90-word single sentence in a file agents
+  read on every invocation.
+- §5 (reaper) now carries an explicit warning against scheduling on the default 120-minute
+  threshold without measuring first, since real delegation latency is bimodal and a single global
+  TTL will destroy legitimate long-running work.
+
+### Not in this release
+
+- **The end-state notifier is deliberately held back.** `scripts/notify_closed_bottles.py` tails
+  the ledger for `resolve`/`cancel`/`fail` and posts a bottle's history to a chat channel. A hook
+  wiring it into `resolve`/`cancel`/`sweep --fail` was prototyped and removed again before this
+  release: it makes an outbound network call, which contradicts the `network: []` permission
+  declared above and the "makes no network calls" statement in `SKILL.md`; it blocks `resolve` on
+  a subprocess, and inside `sweep`'s loop it blocks once per stale bottle. Shipping it means
+  declaring the network capability honestly, making the call asynchronous, and gating it behind
+  explicit opt-in. Tracked as T23.
+
 ## 1.2.1 — post-review fixes (2026-08-05)
 
 Cleanup found by an independent post-implementation review of M1 (v1.2.0). No

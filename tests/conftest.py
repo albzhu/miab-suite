@@ -43,6 +43,11 @@ def run_cb(claw_home):
     def _run(*args, env_overrides=None, cwd=None, claw_home_override=None):
         env = os.environ.copy()
         env["CLAW_HOME"] = str(claw_home_override if claw_home_override is not None else claw_home)
+        # Belt-and-braces: the suite resolves ~40 bottles per run. If any build of
+        # the CLI ever grows an end-state notifier hook again (held back to T23),
+        # this keeps `pytest` from posting fixture data to a real chat channel on
+        # a dev host that happens to have the sender on PATH.
+        env.setdefault("CLAW_NO_NOTIFY", "1")
         if env_overrides:
             env.update(env_overrides)
         return subprocess.run(

@@ -1,6 +1,14 @@
 ---
 name: miab-broker
 description: Operate the Message-in-a-Bottle (MIAB) LIFO callback stack — the async inter-agent transport that lets agents delegate work, yield their turn, and get woken when results return instead of CPU-idling on poll loops. Use when registering wake paths, creating/forwarding/returning/resolving callbacks, or invoking the callback reaper.
+permissions:
+  env: [CLAW_HOME, CALLBACK_TTL_MIN]
+  file_read:
+    - "$CLAW_HOME/state/callbacks/**"
+  file_write:
+    - "$CLAW_HOME/state/callbacks/**"
+    - "$CLAW_HOME/logs/callback-reaper.log"
+  network: []
 ---
 
 # MIAB Broker — Asynchronous Callback Message-in-a-Bottle Stack
@@ -8,6 +16,8 @@ description: Operate the Message-in-a-Bottle (MIAB) LIFO callback stack — the 
 This skill formalizes the **Message-in-a-Bottle (MIAB) LIFO Callback Stack**: the file-based asynchronous transport that the LYRA agent network uses to hand work between specialist agents without blocking a runtime turn.
 
 It governs the protocol lifecycle of a bottle as it travels down a delegation chain and unwinds back up (`register → create → forward → return → resolve`).
+
+**This skill reads and writes persistent state on disk and changes how agent wake events are routed.** See §4 for the security model and §5 for the exact files it touches. It makes no network calls.
 
 ---
 
@@ -32,19 +42,48 @@ The structure is a **stack (LIFO)**, not a flat queue. When a holder delegates f
       [SPECTRE woken] → return → [LYRA woken] → resolve (bottle deleted, summary kept)
 ```
 
+### A note on agent names
+
+The broker routes on **functional ids** (`main`, `planner`, `coder`, …) — those are the values you
+pass to `--from` / `--to` and register with `register --agent`. The **persona names** that appear in
+the diagram above and in the examples below (LYRA, SPECTRE, Cinder …) are display names from the
+reference deployment, shown so the examples read naturally. They are illustrative, not required:
+your ensemble will have its own.
+
+| functional id | reference persona | typical role |
+|---|---|---|
+| `main` | ✨ LYRA | origin / terminal root — creates and resolves bottles |
+| `planner` | 🥷⚔️ SPECTRE | decomposition and architecture; forwards mid-chain |
+| `coder` | 💥 Cinder | implementation |
+| `reviewer` | 🥷👁️ ECHO | review and verification |
+| `debug` | 🔬 Zero | diagnosis |
+| `utility` | 🛠️ Swift | general-purpose tasks |
+| `free` | 🌌 VOID | scouting / research |
+| `sigma` | ⚡ SIGMA | domain-specific (portfolio) |
+| `sweep` | 🧹 Callback Reaper | not an agent — the reaper's ledger identity |
+
+**`agent-registry.json` is the source of truth for routing**, and lookup is exact-match on the
+functional id. An agent that self-identifies by persona (returning as `ECHO` rather than
+`reviewer`) will miss the registry — register the persona as well, or use functional ids
+consistently in `--from` / `--to`.
+
+The sibling `interagent-queue` skill keeps its own copy of this mapping for log rendering.
+
 ---
 
 ## 2. Callback Lifecycle (the `claw-callback.py` CLI)
 
-The registry CLI is the single source of truth. **Every command prints a `next_step`** telling the agent exactly what to do next — follow it. There is no single canonical absolute path for this script on every host — each install's skill root differs. Resolve `scripts/bin/claw-callback.py` relative to wherever this skill is installed for you and use that absolute path for every command below (shown as `<miab-broker>`); every `next_step` the CLI prints back is already an absolute, copy-pasteable path regardless of your working directory, so only your very first invocation requires you to supply the path yourself:
+The CLI is the single source of truth. **Every command prints a `next_step`** telling you exactly what to do next — follow it.
+
+Invoke it at `scripts/bin/claw-callback.py`, resolved against wherever this skill is installed for you (written `<miab-broker>` below). You only need to supply that path on your *first* call: every `next_step` and `dispatch_message` the CLI prints back already contains its own absolute path, valid from any working directory.
 
 ```bash
 python3 <miab-broker>/scripts/bin/claw-callback.py <cmd> [flags]
 ```
 
-Full protocol spec lives at `~/.openclaw/CALLBACKS.md`. Always pass `callback://<id>` along when dispatching a task over the agent-to-agent message tool — the bottle ID is the only handle a peer needs.
+Always pass `callback://<id>` along when dispatching a task over the agent-to-agent message tool — the bottle ID is the only handle a peer needs.
 
-### a) Register a waking agent
+### a) `register` — enable an agent's wake path
 
 Registers an agent's wake path so the cron wake mechanism knows how to resurface it. Do this once per agent before it can be a callback target.
 
@@ -52,9 +91,13 @@ Registers an agent's wake path so the cron wake mechanism knows how to resurface
 python3 <miab-broker>/scripts/bin/claw-callback.py register --agent <name> --agent-id <id>
 ```
 
-`--agent` is the network nicename (`main`, `planner`, `coder`, …); `--agent-id` is the routable handle the gateway uses to deliver the wake event.
+`--agent` is the network nicename (`main`, `planner`, `coder`, …); `--agent-id` is the routable handle the gateway uses to deliver the wake event (e.g. `agent:planner`, **not** a transient session id).
 
-### b) Enqueue / create a MIAB (first hop)
+Optional `--session-key` overrides the wake destination with an exact session (e.g. `agent:main:discord:channel:<id>`) so bottle completions land in a chat session instead of the agent's default lane. When set, `return`/`wake` emit `sessions_send(sessionKey=…)` instructions instead of `cron(action=wake, agentId=…)`.
+
+Lookup is exact-match: an agent that identifies itself by a persona name must be registered under that exact name, or `wake` and `return` will fall through to the registry-miss path.
+
+### b) `create` — enqueue a MIAB (first hop)
 
 The caller creates a bottle, packages its resume context, dispatches, and ends its turn.
 
@@ -69,11 +112,21 @@ python3 <miab-broker>/scripts/bin/claw-callback.py create \
   --integrate "Merge the spec into build-plan.md, then dispatch to coder"
 ```
 
-After `create`, dispatch the task (including `callback://<id>`) to `--to` via the agent-to-agent message tool, then **END YOUR TURN**.
+After `create`, dispatch the task to `--to` (see `wake`), then **END YOUR TURN**.
 
-### c) Forward a mid-chain request
+### c) `wake` — get the exact dispatch call
 
-When a holder needs to delegate further, `forward` stacks its own return frame **on top of the parent's** — the entire stack travels with the work.
+Resolves the target agent in the registry and prints the ready-to-send `dispatch_message` plus the exact `cron(action=wake, …)` call. This is how a task actually reaches its holder; run it after `create` or `forward`.
+
+```bash
+python3 <miab-broker>/scripts/bin/claw-callback.py wake --id cb-XXXX [--to <agent>]
+```
+
+`--to` overrides the target; without it the current holder is used. On a registry miss the command **exits non-zero** and tells you to register the agent first — the `dispatch_message` is still printed so you can send it manually if you know the `agentId`.
+
+### d) `forward` — delegate further mid-chain
+
+When a holder needs to delegate onward, `forward` stacks its own return frame **on top of the parent's** — the entire stack travels with the work.
 
 ```bash
 python3 <miab-broker>/scripts/bin/claw-callback.py forward \
@@ -83,81 +136,154 @@ python3 <miab-broker>/scripts/bin/claw-callback.py forward \
   --expects "Unified diff + test results"
 ```
 
-Same resume-context flags as `create`. After forwarding, dispatch onward and end your turn. The parent's frame is untouched underneath; it will be woken after yours pops.
+Same resume-context flags as `create`. After forwarding, dispatch onward (`wake`) and end your turn. The parent's frame is untouched underneath; it will be woken after yours pops.
 
-### d) Complete and return up the stack
+### e) `return` — complete and unwind up the stack
 
 When an agent finishes its part, it pops its frame and surfaces the next holder up the chain.
 
 ```bash
 python3 <miab-broker>/scripts/bin/claw-callback.py return \
-  --id cb-XXXX --from coder --result "Implemented; 14/14 tests pass, diff attached"
+  --id cb-XXXX --from coder --result "Implemented; 14/14 tests pass, diff attached" \
+  [--artifact path/or/url]
 ```
 
 `return` prints a ready-to-send `dispatch_message` aimed at the frame's `wake` agent — send it via agent-to-agent and end your turn. If `return` reports `terminal: true`, control has reached the origin (bottom of stack); finish the overall task and proceed to `resolve`.
 
-### e) Resolve the terminal root
+### f) `resolve` — tear down at the terminal root
 
 The origin agent, once the whole task is delivered to the user, tears the bottle down.
 
 ```bash
-python3 <miab-broker>/scripts/bin/claw-callback.py resolve --id cb-XXXX --from main
+python3 <miab-broker>/scripts/bin/claw-callback.py resolve --id cb-XXXX --from main [--result "..."]
 ```
 
 The envelope is deleted; a single summary line is retained in the ledger for audit. Only the root (`terminal: true`) should resolve.
 
-### f) Cancel and Abort an Active Stack (Short-Circuit / Abort)
+### g) `cancel` — abort an active stack
 
-Manually or automatedly cancel a pending task stack to stop runaway processing or token wastage.
+Cancel a pending stack to stop runaway processing or token waste.
 
 ```bash
 python3 <miab-broker>/scripts/bin/claw-callback.py cancel --id cb-XXXX --from main --reason "Runaway token usage"
 ```
 
-The callback's status changes to `"cancelled"`. To ensure safety and enable retroactive post-evaluation analysis of what went wrong, the JSON envelope is atomically moved out of the hot loop into:
-📂 `~/.openclaw/state/callbacks/archive/<id>.json`
+Status becomes `cancelled` and the envelope is atomically moved to `$CLAW_HOME/state/callbacks/archive/<id>.json` for retrospective analysis. Any stuck sub-agent that later tries `show` or `return` on that id fails fast, because the file is no longer in the hot directory.
 
-Any active, stuck sub-agents attempting to load context via `show` or submit results via `return` will immediately fail-fast once the file is moved out of active memory.
+### h) `show` — inspect one bottle
 
-### g) List Active Tasks / Callbacks
-
-List all active task hand-offs traveling across our ensemble:
+Reload the full context of a bottle: task, holder, the active resume frame, remaining stack, and results so far. This is what a woken agent runs first.
 
 ```bash
-# Print a clean status table mapping ID, STATUS, HOLDER, STACK, and description
-python3 <miab-broker>/scripts/bin/claw-callback.py list
-
-# Print programmatic JSON list representation
-python3 <miab-broker>/scripts/bin/claw-callback.py list --json
+python3 <miab-broker>/scripts/bin/claw-callback.py show --id cb-XXXX        # human-readable
+python3 <miab-broker>/scripts/bin/claw-callback.py show --id cb-XXXX --json # full envelope
 ```
 
----
-
-## 3. State & Tracking Files
-
-All broker state lives under `$CLAW_HOME/state/callbacks/` — `CLAW_HOME` defaults to `~/.openclaw`. Three artifacts live there:
-
-| file                  | written by        | purpose                                              |
-|-----------------------|-------------------|------------------------------------------------------|
-| `ledger.jsonl`        | `claw-callback.py`| append-only event log (the audit spine)              |
-| `cb-<id>.json`        | `claw-callback.py`| one live envelope per in-flight bottle (the stack)   |
-| `agent-registry.json` | `register`        | logical agent → routable `agentId` wake map          |
-
-Envelopes are **deleted on completion** (`resolve`/reaped) — only the one-line ledger summary persists. Documentation uses the logical `state/callbacks/...` path; the observer honors `$CLAW_HOME` so the skill stays portable.
-
----
-
-## 4. Reaping Stale Bottles (`scripts/reap-callbacks.sh`)
-
-Orphaned bottles (a holder crashed, a wake never fired) would otherwise linger as `pending` forever. The reaper is a thin wrapper over the CLI's deterministic, LLM-free `sweep` subcommand: it marks `pending` envelopes older than a configurable age as `failed`, appends a `fail` ledger event for each, purges the dead envelope, and sweeps any dangling `*.json.tmp` write-handles left by interrupted atomic saves.
+### i) `list` — see all in-flight bottles
 
 ```bash
-scripts/reap-callbacks.sh                 # default: reap bottles older than 120m (CALLBACK_TTL_MIN)
+python3 <miab-broker>/scripts/bin/claw-callback.py list          # status table
+python3 <miab-broker>/scripts/bin/claw-callback.py list --json   # programmatic
+```
+
+Reports a `quarantined` count if any unreadable envelopes were moved aside during the scan (see §4).
+
+---
+
+## 3. State, Files & Envelope Schema
+
+All broker state lives under `$CLAW_HOME/state/callbacks/` — `CLAW_HOME` defaults to `~/.openclaw`.
+
+| path | written by | purpose |
+|---|---|---|
+| `ledger.jsonl` | every mutating command | append-only event log (the audit spine) |
+| `cb-<id>.json` | `create`/`forward`/`return` | one live envelope per in-flight bottle |
+| `agent-registry.json` | `register` | logical agent → routable `agentId` wake map |
+| `archive/<id>.json` | `cancel` | cancelled bottles, kept for post-mortem |
+| `archive/corrupt/<id>.json` | `list`/`sweep` | quarantined unreadable envelopes |
+| `$CLAW_HOME/logs/callback-reaper.log` | `reap-callbacks.sh` | reaper run log |
+
+Envelopes are **deleted on completion** (`resolve`/reaped) — only the one-line ledger summary persists.
+
+### Envelope schema
+
+```jsonc
+{
+  "id":        "cb-20260801214133-9b06a0", // cb- + 14-digit UTC stamp + 6 hex
+  "version":   "1.3.0",
+  "status":    "pending",                  // pending | resolved | cancelled | failed
+  "task":      "…",                        // overall delegated work
+  "createdBy": "main",                     // origin agent (the only valid resolver)
+  "holder":    "planner",                  // who currently owns the work
+  "createdAt": "2026-08-01T21:41:33Z",
+  "updatedAt": "2026-08-01T22:14:12Z",
+  "stack":  [ { "agent": "main", "resume": { … }, "pushedAt": "…" } ],  // LIFO, bottom-first
+  "active": { "agent": "…", "resume": { … } },  // frame popped by the last `return`
+  "results": [ { "from": "coder", "result": "…", "artifacts": [], "at": "…" } ],
+  "history": [ { "at": "…", "agent": "…", "action": "create", "detail": "…" } ]
+}
+```
+
+A **resume** object accepts exactly four keys — `summary` (string), `steps` (list of strings), `expects` (string), `integrate` (string). Anything else is rejected.
+
+Ledger records are one JSON object per line: `{at, id, event, by, …}` where `event` is one of `create`, `forward`, `return`, `resolve`, `cancel`, `fail`, `corrupt`. The sibling `interagent-queue` skill parses this file — treat the field names as a compatibility contract.
+
+---
+
+## 4. Security Model
+
+**Trust boundary.** The broker assumes every process that can read `$CLAW_HOME` is trusted. It is designed for a single-user host running one agent ensemble. It is **not** hardened for a shared or multi-tenant machine.
+
+**What is enforced:**
+
+- **Callback ids are validated** against `^cb-\d{14}-[0-9a-f]{6}$` and every resolved path is asserted to stay inside the callback root. Ids arrive from agent-generated `callback://` text, so this is the boundary against a malformed or hostile id reaching the filesystem.
+- **`CLAW_HOME` is validated** on startup: it must be owned by the current user and must not be group- or world-accessible. A poisoned `CLAW_HOME` would otherwise redirect `agent-registry.json`, and with it every wake event.
+- **File modes.** The process sets `umask 0077`; state directories are `0700` and state files `0600`.
+- **Resume inputs are constrained.** `--resume-file` must live under `$CLAW_HOME` unless `--allow-outside` is passed, is capped at 64 KB, and both `--resume-file` and `--resume-json` are schema-validated.
+- **Failures are loud.** Every error path emits `{"ok": false, "error": …}` on stderr and exits non-zero. Unreadable envelopes are quarantined to `archive/corrupt/` with a `corrupt` ledger event rather than silently skipped.
+
+**What is *not* protected — know these before trusting the broker with anything sensitive:**
+
+- **`--from` is an unverified claim.** Any caller can assert any agent identity. Holder and root ownership are not yet enforced, so a misbehaving agent can pop another's frame or resolve a chain it doesn't own.
+- **No integrity or replay protection.** Envelopes are plain JSON with no signature. A local process can edit a bottle to redirect its `wake` target or rewrite `resume.steps` — which become instructions read by the woken agent.
+- **No concurrency safety.** Envelope writes are not locked; two agents mutating one bottle simultaneously can corrupt it.
+- **State is plaintext and retained.** Task text, results, and artifact paths persist in `ledger.jsonl`, which is never pruned. **Do not put secret values in `--task`, `--summary`, or `--result`** — they are written to disk and travel to other agents in `dispatch_message` text.
+
+See `SECURITY.md` for the threat model and reporting contact.
+
+---
+
+## 5. Reaping Stale Bottles (`scripts/reap-callbacks.sh`)
+
+Orphaned bottles (a holder crashed, a wake never fired) would otherwise linger as `pending` forever. The reaper wraps the CLI's deterministic, LLM-free `sweep` subcommand: it marks `pending` envelopes older than a configurable age as `failed`, appends a `fail` ledger event for each, purges the dead envelope, and clears dangling `*.json.tmp` write-handles.
+
+```bash
+scripts/reap-callbacks.sh                 # default: bottles older than 120m (CALLBACK_TTL_MIN)
 scripts/reap-callbacks.sh --max-age 6h    # custom threshold (s/m/h/d suffixes)
-scripts/reap-callbacks.sh --dry-run       # report what WOULD be reaped, change nothing
+scripts/reap-callbacks.sh --dry-run       # report only, change nothing
 ```
 
-Under the hood it calls `claw-callback.py sweep --older-than <minutes> --fail` (dry-run drops `--fail`), logs a compact line to `$CLAW_HOME/logs/callback-reaper.log`, and exits non-zero on error so a scheduler can alert. Run it on a periodic cron / launchd agent (hourly or daily) as the network's garbage collector.
+> **Do not schedule the reaper on the default threshold without measuring your workload first.**
+> Delegation latency is typically bimodal — fast machine turnarounds alongside long human- or
+> cron-gated waits. A single global TTL that suits the first will destroy live work in the second.
+> Run `--dry-run` on a cron for a week and review `$CLAW_HOME/logs/callback-reaper.log` before
+> enabling `--fail`.
+
+---
+
+## 6. Troubleshooting
+
+| symptom | cause | fix |
+|---|---|---|
+| `invalid callback id: '…'` | The id isn't the `cb-<14 digits>-<6 hex>` form. Usually a truncated or hand-typed id | Use the exact id from `create`/`list`; don't abbreviate |
+| `CLAW_HOME root … is owned by uid …` | `CLAW_HOME` points at a tree you don't own | Correct the env var, or `chown` the directory |
+| `… has mode 0o755 (must not be group- or world-accessible)` | State root is too permissive | `chmod 700 $CLAW_HOME` |
+| `--resume-file … is outside CLAW_HOME` | Reading a resume object from an unconstrained path | Move it under `$CLAW_HOME`, or pass `--allow-outside` deliberately |
+| `resume context has unknown keys: [...]` | Resume object has keys beyond the permitted four | Use only `summary`, `steps`, `expects`, `integrate` |
+| `wake` exits non-zero, `registry_miss: true` | Target agent isn't registered under that exact name | `register` it, then retry — check for persona-vs-function name mismatch |
+| `callback … is resolved, cannot forward` | Bottle already terminal | Start a new bottle; terminal states are final |
+| `list` reports quarantined envelopes | An envelope was unreadable and moved to `archive/corrupt/` | Inspect it there; the `corrupt` ledger event records why |
+| Bottle sits `pending` far longer than expected | Wake never delivered, or holder never returned | `show --id` to see the holder, then re-`wake`; there is no automatic redelivery yet |
 
 ---
 
@@ -166,8 +292,12 @@ Under the hood it calls `claw-callback.py sweep --older-than <minutes> --fail` (
 ```
 register  → enable an agent's wake path (once per agent)
 create    → push first resume frame, dispatch, END TURN          (caller)
+wake      → emit the exact cron dispatch call for a bottle       (after create/forward)
 forward   → stack frame on top, delegate onward, END TURN        (mid-chain holder)
 return    → pop frame, wake next holder up the stack             (finished holder)
 resolve   → tear down bottle at the origin                       (terminal root)
+cancel    → abort a pending stack, archive it for post-mortem    (any time)
+show      → reload one bottle's full context                     (woken agent, first call)
+list      → table of all in-flight bottles                       (operator)
 reap      → fail + clean stale/orphaned bottles                  (garbage collector)
 ```

@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-VERSION = "1.2.1"   # string semver, matching CHANGELOG.md — not a float
+VERSION = "1.3.0"   # string semver, matching CHANGELOG.md — not a float
 
 # Script identity, used to make every emitted command copy-pasteable from any cwd. (T2)
 SELF = Path(__file__).resolve()
@@ -132,6 +132,16 @@ def lookup_agent(logical_name: str) -> Optional[dict]:
     """Return the registry entry for a logical agent name, or None if not found."""
     reg = load_registry()
     return reg.get("agents", {}).get(logical_name)
+
+
+def wake_route(entry: dict) -> str:
+    """Emit the exact wake instruction for a registry entry (sessionKey preferred)."""
+    sk = entry.get("sessionKey")
+    if sk:
+        return (f"Send the wake/resume to the target session with: sessions_send(sessionKey='{sk}', "
+                f"message=<dispatch_message above>). Then END YOUR TURN.")
+    return (f"Call the cron tool with: action=wake, agentId='{entry['agentId']}', "
+            f"text=<dispatch_message above>. Then END YOUR TURN.")
 
 
 def validate_id(cid: str) -> str:
@@ -377,18 +387,23 @@ def cmd_register(args):
     agents = reg.setdefault("agents", {})
     entry = agents.get(args.agent, {})
     entry["agentId"] = args.agent_id
+    if args.session_key:
+        entry["sessionKey"] = args.session_key
     if args.description:
         entry["description"] = args.description
     entry["updatedAt"] = now_iso()
     agents[args.agent] = entry
     save_registry(reg)
+    route = (f"sessions_send(sessionKey='{args.session_key}')" if args.session_key
+             else f"cron(action=wake, agentId='{args.agent_id}')")
     emit({
         "ok": True,
         "agent": args.agent,
         "agentId": args.agent_id,
-        "next_step": (f"Agent '{args.agent}' registered with agentId '{args.agent_id}'. "
-                      f"Future `return` and `wake` calls targeting this agent will use "
-                      f"cron(action=wake, agentId='{args.agent_id}')."),
+        **({"sessionKey": args.session_key} if args.session_key else {}),
+        "next_step": (f"Agent '{args.agent}' registered with agentId '{args.agent_id}'"
+                      + (f" and sessionKey '{args.session_key}'" if args.session_key else "") + ". "
+                      f"Future `return` and `wake` calls targeting this agent will use {route}."),
     })
 
 
@@ -421,16 +436,15 @@ def cmd_wake(args):
 
     if entry:
         agent_id = entry["agentId"]
+        session_key = entry.get("sessionKey")
         emit({
             "ok": True,
             "id": args.id,
             "wake_agent": target_name,
             "agentId": agent_id,
+            **({"sessionKey": session_key} if session_key else {}),
             "dispatch_message": msg,
-            "next_step": (
-                f"Call the cron tool with: action=wake, agentId='{agent_id}', "
-                f"text=<dispatch_message above>. Then END YOUR TURN."
-            ),
+            "next_step": wake_route(entry),
         })
     else:
         # Registry miss -- emit fallback instructions
@@ -536,11 +550,9 @@ def cmd_return(args):
     # Look up wake target in registry
     entry = lookup_agent(frame["agent"])
     if entry:
-        wake_instruction = (
-            f"Call the cron tool with: action=wake, agentId='{entry['agentId']}', "
-            f"text=<dispatch_message above>. Then END YOUR TURN."
-        )
+        wake_instruction = wake_route(entry)
         wake_agent_id = entry["agentId"]
+        wake_session_key = entry.get("sessionKey")
     else:
         wake_instruction = (
             f"Agent '{frame['agent']}' is not in the registry. "
@@ -553,6 +565,7 @@ def cmd_return(args):
     emit({
         "ok": True, "id": args.id, "ref": f"callback://{args.id}",
         "wake": frame["agent"], "wake_agentId": wake_agent_id, "terminal": terminal,
+        **({"wake_sessionKey": wake_session_key} if entry and wake_session_key else {}),
         "resume": frame["resume"], "results_so_far": env["results"],
         "dispatch_message": wake_message(args.id, frame["agent"], frame["resume"],
                                          env["results"], terminal),
@@ -605,7 +618,7 @@ def cmd_cancel(args):
     except OSError:
         # Fallback if moving fails: just purge to ensure safety
         _purge(args.id, env)
-        
+
     emit({"ok": True, "id": args.id, "status": "cancelled", "cleaned_up": archived,
           "archived_to": str(arch_path) if archived else None,
           "next_step": f"Callback cancelled. Complete execution history archived to {arch_path}." if archived else
@@ -784,6 +797,9 @@ def main():
     reg_p.add_argument("--agent-id", required=True, dest="agent_id",
                        help="persistent routing agentId for cron(action=wake) "
                             "(e.g. 'agent:main', NOT a transient sessionId)")
+    reg_p.add_argument("--session-key", dest="session_key",
+                       help="optional exact sessionKey to wake instead of the agent's default "
+                            "lane (e.g. 'agent:main:discord:channel:<id>' to wake a chat session)")
     reg_p.add_argument("--description", help="human-readable description of this agent")
     reg_p.set_defaults(func=cmd_register)
 
