@@ -1,6 +1,15 @@
 ---
 name: "interagent-queue"
 description: "Monitor and log MIAB transaction ledger events to a file. Requires miab-broker as a prerequisite."
+permissions:
+  env: [CLAW_HOME, LYRA_WORKSPACE, CLAW_QUEUE_LOG]
+  file_read:
+    - "$CLAW_HOME/state/callbacks/ledger.jsonl"
+    - "$CLAW_HOME/state/callbacks/agent-registry.json"
+  file_write:
+    - "$LYRA_WORKSPACE/state/callbacks/queue_state.json"
+    - "$CLAW_HOME/logs/interagent-queue.log"
+  network: []
 ---
 
 # Interagent Queue — Asynchronous Transaction Observer
@@ -25,21 +34,23 @@ Transaction events are written directly to the interagent queue log file (`$CLAW
 
 ## 2. Invocations & Commands
 
-The utility script `interagent_queue.py` can be driven from the CLI to enable/disable sweeps, check cursor tracking status, or run isolated manual analysis:
+The utility script `interagent_queue.py` can be driven from the CLI to enable/disable sweeps, check cursor tracking status, or run isolated manual analysis.
+
+Invoke it at `scripts/interagent_queue.py`, resolved against wherever this skill is installed for you (written `<interagent-queue>` below). There is no fixed absolute path that is correct across installs.
 
 ```bash
 # Toggle logging sweeps
-python3 Skills/interagent-queue/scripts/interagent_queue.py on
-python3 Skills/interagent-queue/scripts/interagent_queue.py off
+python3 <interagent-queue>/scripts/interagent_queue.py on
+python3 <interagent-queue>/scripts/interagent_queue.py off
 
 # Check cursor status, live state file, log file path, and target ledger
-python3 Skills/interagent-queue/scripts/interagent_queue.py status
+python3 <interagent-queue>/scripts/interagent_queue.py status
 
 # Manually process and sweep all un-processed ledger records into the log file
-python3 Skills/interagent-queue/scripts/interagent_queue.py process
+python3 <interagent-queue>/scripts/interagent_queue.py process
 
 # Peek at new ledger records inside stdout WITHOUT updating your cursor or writing to the log file
-python3 Skills/interagent-queue/scripts/interagent_queue.py peek
+python3 <interagent-queue>/scripts/interagent_queue.py peek
 ```
 
 ---

@@ -17,7 +17,15 @@ This skill formalizes the **Message-in-a-Bottle (MIAB) LIFO Callback Stack**: th
 
 It governs the protocol lifecycle of a bottle as it travels down a delegation chain and unwinds back up (`register → create → forward → return → resolve`).
 
-**This skill reads and writes persistent state on disk and changes how agent wake events are routed.** See §4 for the security model and §5 for the exact files it touches. It makes no network calls.
+**This skill reads and writes persistent state on disk and changes how agent wake events are routed.** See §4 for the security model and §5 for the exact files it touches.
+
+**The broker CLI (`scripts/bin/claw-callback.py`) makes no network calls** — that is what the
+`network: []` declaration above covers. The two closed-bottle notifier scripts that currently sit
+beside it in `scripts/` are *not* part of the CLI: `notify_closed_bottles.py` shells out to
+`openclaw message send`, which does reach the network. They are cron-driven, never invoked by the
+CLI, and are scheduled to move to the `interagent-queue` reader in ADR-001 Phase 2 (T23), where the
+delivery sink belongs and where `network` can be declared honestly for it. Until then, treat the
+`network: []` declaration as scoped to the CLI, not to everything in the directory.
 
 ---
 

@@ -2,6 +2,38 @@
 
 All notable changes to the `miab-broker` skill are recorded here.
 
+## Unreleased
+
+### Changed
+
+- **This skill now lives in a combined repository** with its reader, `interagent-queue`
+  (ADR-001, accepted 2026-08-25). Paths shifted one level: the CLI is at
+  `miab-broker/scripts/bin/claw-callback.py` relative to the repo root, and the shared
+  `tests/` tree sits at the root and resolves both skills. Entries below this one predate
+  the move and refer to the old `Skills/miab-broker/...` layout; they are left as written.
+- `CLAW_CLOSED_TARGET` is now **required** by `scripts/notify_closed_bottles.py`, which fails
+  closed with `{"ok": false, ...}` and a non-zero exit when it is unset. The previous hardcoded
+  channel-id default is gone: it was both a secret in committed text and a way to mistarget
+  delivery on a host that never configured the notifier. `status` still reports the target as
+  `null` rather than failing, so the command stays diagnostic.
+
+### Added
+
+- `tests/contract/` — asserts that every ledger event type the writer can emit has a renderer in
+  `interagent_queue.py`. The writer's event list is derived from its own AST, never hand-kept: an
+  event type with no renderer returns `None` from `format_event()` and is dropped by
+  `collect_new()`, so the failure mode is silence. That shipped once (`corrupt`, 1.2.0) and nearly
+  shipped twice (`authority-override`, 2.0.0).
+- CI (`.github/workflows/tests.yml`) runs the full suite on push and pull request.
+
+### Fixed
+
+- The test suite ran zero tests after the repository combine: `tests/conftest.py` still resolved
+  the CLI at the pre-move path and asserted its existence at import time, so collection failed.
+  Both skill trees are now resolved from the repo root and asserted.
+- All 6 `pytest.skip` paths in `tests/test_ledger_schema_compat.py` are gone. They existed to
+  tolerate a missing sibling checkout; with both trees in one repo, a missing one is a bug.
+
 ## 2.0.0 — M3 "Trustworthy routing" (2026-08-19)
 
 Identity and authority milestone (T14, T15, T12 of the execution backlog, plus Q9 in the sibling
