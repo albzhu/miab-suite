@@ -19,10 +19,17 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]          # Skills/miab-broker
-CB_SCRIPT = REPO_ROOT / "scripts" / "bin" / "claw-callback.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]          # the combined repo root
+BROKER_ROOT = REPO_ROOT / "miab-broker"                  # the writer skill
+IQ_ROOT = REPO_ROOT / "interagent-queue"                 # the reader skill
+CB_SCRIPT = BROKER_ROOT / "scripts" / "bin" / "claw-callback.py"
+IQ_SCRIPT = IQ_ROOT / "scripts" / "interagent_queue.py"
 
-assert CB_SCRIPT.exists(), f"expected CLI at {CB_SCRIPT}"
+# Both skills live in this repo. A missing one is a broken checkout, not a
+# reason to skip: the whole point of combining the trees (ADR-001) was to make
+# the writer/reader contract testable unconditionally.
+assert CB_SCRIPT.exists(), f"expected broker CLI at {CB_SCRIPT}"
+assert IQ_SCRIPT.exists(), f"expected reader CLI at {IQ_SCRIPT}"
 
 
 @pytest.fixture

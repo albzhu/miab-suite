@@ -1,0 +1,40 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The broker is stdlib-only and uses `str | None` unions at runtime,
+        # so 3.10 is the floor.
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # No requirements file on purpose: the skills themselves must stay
+      # stdlib-only. pytest is the suite's only dependency, and CI installing
+      # anything more would stop that being enforced by construction.
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Run the suite, and fail if anything was skipped
+        # A skip in this suite means a skill tree is missing -- a broken
+        # checkout, not a condition to tolerate. ADR-001 Phase 1's definition
+        # of done is "runs the full suite with 0 skipped", so assert it here
+        # rather than letting a green-with-skips run look like a pass.
+        run: |
+          set -o pipefail
+          pytest -q --strict-markers -rs | tee pytest.out
+          if grep -qE '[0-9]+ skipped' pytest.out; then
+            echo "::error::the suite skipped at least one test; see ADR-001 Phase 1"
+            exit 1
+          fi
