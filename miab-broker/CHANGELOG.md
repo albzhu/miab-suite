@@ -2,7 +2,14 @@
 
 All notable changes to the `miab-broker` skill are recorded here.
 
-## Unreleased
+## 2.0.0 — first ClawHub publish (2026-08-27; program unchanged since the 2026-08-19 tag)
+
+No change to the shipping program. `scripts/bin/claw-callback.py`, `scripts/reap-callbacks.sh`
+and `SECURITY.md` are byte-identical to the `v2.0.0` tag (`de4aeba`, 2026-08-19); everything in
+this section is repository, packaging or documentation work done since that tag, republished
+under the same version because the code a user installs is the same code. ClawHub has never
+served 2.0.0 — it is still on 1.3.0 — so this is that version's first publication, not a
+re-publication over an existing one. The M3 section below records what 2.0.0 actually changed.
 
 ### Changed
 
@@ -11,11 +18,14 @@ All notable changes to the `miab-broker` skill are recorded here.
   `miab-broker/scripts/bin/claw-callback.py` relative to the repo root, and the shared
   `tests/` tree sits at the root and resolves both skills. Entries below this one predate
   the move and refer to the old `Skills/miab-broker/...` layout; they are left as written.
-- `CLAW_CLOSED_TARGET` is now **required** by `scripts/notify_closed_bottles.py`, which fails
-  closed with `{"ok": false, ...}` and a non-zero exit when it is unset. The previous hardcoded
-  channel-id default is gone: it was both a secret in committed text and a way to mistarget
-  delivery on a host that never configured the notifier. `status` still reports the target as
-  `null` rather than failing, so the command stays diagnostic.
+- **`network: []` is now true without qualification** (ADR-001 T23). `notify_closed_bottles.py`
+  and `notify_closed_dryrun.py` have moved to the `interagent-queue` reader, where the delivery
+  sink belongs. They had become tracked files in this directory during the combine, and while the
+  CLI itself never called them, a package that contains a script shelling out to
+  `openclaw message send` cannot honestly declare `network: []` — the previous scoping of that
+  claim to the CLI lived in prose, which no scanner reads. Nothing here now reaches the network
+  or reads the `CLAW_CLOSED_*` environment, so the declared `env: [CLAW_HOME, CALLBACK_TTL_MIN]`
+  is exact. Their changelog history continues in `interagent-queue/CHANGELOG.md`.
 
 ### Added
 

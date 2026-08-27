@@ -19,13 +19,14 @@ It governs the protocol lifecycle of a bottle as it travels down a delegation ch
 
 **This skill reads and writes persistent state on disk and changes how agent wake events are routed.** See §4 for the security model and §5 for the exact files it touches.
 
-**The broker CLI (`scripts/bin/claw-callback.py`) makes no network calls** — that is what the
-`network: []` declaration above covers. The two closed-bottle notifier scripts that currently sit
-beside it in `scripts/` are *not* part of the CLI: `notify_closed_bottles.py` shells out to
-`openclaw message send`, which does reach the network. They are cron-driven, never invoked by the
-CLI, and are scheduled to move to the `interagent-queue` reader in ADR-001 Phase 2 (T23), where the
-delivery sink belongs and where `network` can be declared honestly for it. Until then, treat the
-`network: []` declaration as scoped to the CLI, not to everything in the directory.
+**This skill makes no network calls.** `network: []` above covers everything in this
+directory, with nothing scoped out of it in prose.
+
+That became true by construction in ADR-001 T23: the two closed-bottle notifier scripts that used
+to sit in `scripts/` — `notify_closed_bottles.py`, which shells out to `openclaw message send`, and
+its `notify_closed_dryrun.py` companion — now live in the `interagent-queue` reader, where the
+delivery sink belongs and where `network` is declared for it. Nothing here reaches the network, and
+nothing here reads the `CLAW_CLOSED_*` environment.
 
 ---
 

@@ -1,15 +1,23 @@
 ---
 name: "interagent-queue"
-description: "Monitor and log MIAB transaction ledger events to a file. Requires miab-broker as a prerequisite."
+description: "Observe the MIAB transaction ledger: render callback events to a human-readable log, and optionally post closed-bottle summaries to a chat target. Requires miab-broker as a prerequisite."
 permissions:
-  env: [CLAW_HOME, LYRA_WORKSPACE, CLAW_LEDGER, CLAW_QUEUE_STATE, CLAW_QUEUE_LOG, CLAW_REGISTRY]
+  env: [CLAW_HOME, LYRA_WORKSPACE, CLAW_LEDGER, CLAW_QUEUE_STATE, CLAW_QUEUE_LOG, CLAW_REGISTRY,
+        CLAW_CLOSED_TARGET, CLAW_CLOSED_STATE, CLAW_CLOSED_ACCOUNT]
   file_read:
     - "$CLAW_HOME/state/callbacks/ledger.jsonl"
     - "$CLAW_HOME/state/callbacks/agent-registry.json"
   file_write:
     - "$LYRA_WORKSPACE/state/callbacks/queue_state.json"
     - "$CLAW_HOME/logs/interagent-queue.log"
-  network: []
+    - "$CLAW_HOME/state/callbacks/closed_bottle_state.json"
+  network:
+    # Indirect egress, and declared anyway. No socket is opened in this skill: the message
+    # sink (scripts/notify_closed_bottles.py) shells out to `openclaw message send`, whose
+    # transport and destination are configured outside this skill via CLAW_CLOSED_TARGET.
+    # The log sink -- the default, and everything under `interagent_queue.py` -- touches
+    # nothing but the local filesystem.
+    - "openclaw message send (delegated subprocess; destination set by CLAW_CLOSED_TARGET)"
 ---
 
 # Interagent Queue — Asynchronous Transaction Observer
@@ -80,6 +88,40 @@ To decouple concerns and ensure multi-platform flexibility (e.g. running under s
 - **Target Log File:** `$CLAW_HOME/logs/interagent-queue.log` (overrideable via `CLAW_QUEUE_LOG`).
 
 ---
+
+## 3a. The Message Sink (`scripts/notify_closed_bottles.py`)
+
+Relocated here from `miab-broker` by ADR-001 T23: the broker is the writer, and a delivery sink
+is a reader concern. The move is what lets the broker declare `network: []` without scoping it
+to one file in prose, and it is why this skill declares network at all.
+
+`interagent_queue.py` remains the default and touches nothing but the local filesystem. The
+message sink is separate, cron-driven, and never invoked by the log sink.
+
+```bash
+# Render what WOULD be sent, without sending or advancing any cursor
+python3 <interagent-queue>/scripts/notify_closed_dryrun.py
+python3 <interagent-queue>/scripts/notify_closed_dryrun.py --json
+python3 <interagent-queue>/scripts/notify_closed_dryrun.py <cid>
+
+# Deliver closed-bottle summaries to CLAW_CLOSED_TARGET
+python3 <interagent-queue>/scripts/notify_closed_bottles.py
+```
+
+- **`CLAW_CLOSED_TARGET` is required and fails closed.** Unset, the notifier exits `1` with
+  `{"ok": false, ...}` and sends nothing. There is no default target: a hardcoded channel id is
+  both a secret in committed text and a way to mistarget delivery on a host that never configured
+  the notifier.
+- **`CLAW_CLOSED_ACCOUNT`** is optional, passed through as `--account`.
+- **Delivery dedup state** lives at `$CLAW_HOME/state/callbacks/closed_bottle_state.json`
+  (overrideable via `CLAW_CLOSED_STATE`), and is separate from the log sink's cursor.
+- **Egress is delegated, not direct.** The notifier opens no socket; it shells out to
+  `openclaw message send`, whose transport and destination are configured outside this skill.
+
+Two known gaps, tracked and not addressed by the relocation: the two sinks still keep
+*separate* cursors and dedup state (ADR-001 item 7 merges them, Phase 2), and
+`notify_closed_dryrun.py` is still a separate script rather than a `--dry-run` flag
+(ADR-001 item 10).
 
 ## 4. Failure Behaviour
 

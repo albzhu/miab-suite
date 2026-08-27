@@ -32,6 +32,23 @@ First release since the skill entered version control, and the first published f
 
 ### Changed
 
+- **The closed-bottle message sink now lives here** (ADR-001 T23). `notify_closed_bottles.py` and
+  `notify_closed_dryrun.py` moved from `miab-broker/scripts/`, where they had become tracked files
+  during the repository combine. A delivery sink is a reader concern, and while the broker CLI
+  never called them, a package containing a script that shells out to `openclaw message send`
+  cannot honestly declare `network: []` — the broker's scoping of that claim to the CLI lived in
+  prose, which no scanner reads. The broker's declaration is now true without qualification, and
+  this skill declares the egress instead. Documented in SKILL.md §3a.
+
+  Carried over from the broker's changelog, since the script moved: **`CLAW_CLOSED_TARGET` is
+  required** and the notifier fails closed with `{"ok": false, ...}` and a non-zero exit when it
+  is unset. The previous hardcoded channel-id default is gone — it was both a secret in committed
+  text and a way to mistarget delivery on a host that never configured the notifier.
+
+  This is a relocation, not the merge. The two sinks still keep separate cursors and separate
+  dedup state; unifying them is ADR-001 item 7, still Phase 2. `notify_closed_dryrun.py` is still
+  a separate script rather than a `--dry-run` flag (item 10).
+
 - **The broker's agent registry is now authoritative for display names** (Q9). `who()` resolves
   through `agent-registry.json` first, falling back to this file's built-in `AGENT_MAP` only for
   agents that have never been registered, and lookups are case-folded to match the broker's
@@ -56,10 +73,17 @@ First release since the skill entered version control, and the first published f
   note of repeating it. The repository's `tests/contract/` now derives the writer's event list from
   its own AST and asserts a renderer exists for each, so this class of gap fails CI instead of
   going quiet.
-- **A `permissions` block in the frontmatter.** 1.2.0 declared none. All six environment variables
-  the script reads are listed — `CLAW_HOME`, `LYRA_WORKSPACE`, `CLAW_LEDGER`, `CLAW_QUEUE_STATE`,
-  `CLAW_QUEUE_LOG`, `CLAW_REGISTRY` — along with the files read and written, and `network: []`.
-  A partial declaration would be worse than none: it is an assertion a scanner can falsify.
+- **A `permissions` block in the frontmatter.** 1.2.0 declared none. Every environment variable
+  either script reads is listed — `CLAW_HOME`, `LYRA_WORKSPACE`, `CLAW_LEDGER`,
+  `CLAW_QUEUE_STATE`, `CLAW_QUEUE_LOG`, `CLAW_REGISTRY` for the log sink, and
+  `CLAW_CLOSED_TARGET`, `CLAW_CLOSED_STATE`, `CLAW_CLOSED_ACCOUNT` for the message sink — along
+  with the files read and written. A partial declaration would be worse than none: it is an
+  assertion a scanner can falsify.
+- **A non-empty `network` declaration**, covering the message sink's delegated egress. The
+  notifier opens no socket itself; it shells out to `openclaw message send`, whose transport and
+  destination are configured outside this skill. Declared anyway, because the skill does cause
+  egress. The log sink — the default path, and all of `interagent_queue.py` — still touches
+  nothing but the local filesystem.
 - **A declared minimum `miab-broker` version: 2.0.0** (Q7). The floor is set by identity, not by
   the ledger format — the `displayName` and `aliases` fields `who()` reads were added by broker
   T14 in 2.0.0, and against an older broker every agent silently falls back to `AGENT_MAP`, which
