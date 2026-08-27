@@ -11,6 +11,38 @@ under the same version because the code a user installs is the same code. ClawHu
 served 2.0.0 — it is still on 1.3.0 — so this is that version's first publication, not a
 re-publication over an existing one. The M3 section below records what 2.0.0 actually changed.
 
+### Security
+
+- **Disclosure: 1.3.0 shipped a hardcoded default delivery target.**
+  `scripts/notify_closed_bottles.py` defaulted `CLAW_CLOSED_TARGET` to a literal Discord
+  channel id belonging to the publisher's own deployment, and that file was inside the 1.3.0
+  package published on 2026-08-08.
+
+  **If you installed 1.3.0 and ran the closed-bottle notifier without setting
+  `CLAW_CLOSED_TARGET`, your callback summaries were delivered to that channel** — sent with
+  your own Discord credentials, to somewhere you did not choose. Callback summaries carry task
+  and result text. Check whether you ran it unconfigured, and treat anything it sent as
+  disclosed to a third party.
+
+  To be clear about what this is and is not: a Discord channel id is an identifier, not a
+  credential. No token, webhook, guild id or account shipped in the package, and knowing the
+  id grants no access to anything. The hazard runs the other way — misdirected delivery *to*
+  that channel by installs that never configured one, not access *for* anyone who read it.
+
+  Fixed twice over. `CLAW_CLOSED_TARGET` is now required and the notifier fails closed with
+  `{"ok": false, ...}` and a non-zero exit when it is unset, so an unconfigured install sends
+  nothing rather than sending to a default. And the script is no longer part of this package
+  at all (see T23 below). Neither of those retracts 1.3.0, which remains as published.
+
+  Note for the record: Phase 1 amended commit `34013ae` to keep this id out of *git history*,
+  and it did — but the package had already been published, and amending a commit does nothing
+  to a published artifact. The remediation was aimed at the wrong surface.
+
+- **ClawScan's suspicious marking on 1.3.0 is addressed at the root.** The listing recorded
+  that the package "contains an under-documented Discord notifier that can send callback
+  history outside the machine despite no-network claims." That was accurate. It is resolved by
+  removing the notifier from this skill rather than by documenting it better.
+
 ### Changed
 
 - **This skill now lives in a combined repository** with its reader, `interagent-queue`
@@ -35,6 +67,14 @@ re-publication over an existing one. The M3 section below records what 2.0.0 act
   `collect_new()`, so the failure mode is silence. That shipped once (`corrupt`, 1.2.0) and nearly
   shipped twice (`authority-override`, 2.0.0).
 - CI (`.github/workflows/tests.yml`) runs the full suite on push and pull request.
+
+### Removed
+
+- **`tests/` is no longer inside this skill directory**, so it no longer ships in the package as
+  it did in 1.3.0. The combine moved the suite to the repository root, where one tree resolves
+  both skills and the writer/reader contract can be tested in one place. The tests did not
+  disappear — `github.com/albzhu/miab-broker` carries them — they are simply no longer duplicated
+  into the installable artifact, which is not where anyone ran them.
 
 ### Fixed
 
