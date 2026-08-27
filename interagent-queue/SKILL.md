@@ -2,7 +2,7 @@
 name: "interagent-queue"
 description: "Monitor and log MIAB transaction ledger events to a file. Requires miab-broker as a prerequisite."
 permissions:
-  env: [CLAW_HOME, LYRA_WORKSPACE, CLAW_QUEUE_LOG]
+  env: [CLAW_HOME, LYRA_WORKSPACE, CLAW_LEDGER, CLAW_QUEUE_STATE, CLAW_QUEUE_LOG, CLAW_REGISTRY]
   file_read:
     - "$CLAW_HOME/state/callbacks/ledger.jsonl"
     - "$CLAW_HOME/state/callbacks/agent-registry.json"
@@ -20,7 +20,17 @@ This skill governs the transaction processing, formatting, and file-based loggin
 
 ## Prerequisites
 
-- **`miab-broker` skill**: `interagent-queue` operates strictly as an observer layer over `miab-broker`. `miab-broker` must be installed and initialized to produce the transaction ledger (`$CLAW_HOME/state/callbacks/ledger.jsonl`).
+- **`miab-broker` skill, version 2.0.0 or later**: `interagent-queue` operates strictly as an
+  observer layer over `miab-broker`. `miab-broker` must be installed and initialized to produce
+  the transaction ledger (`$CLAW_HOME/state/callbacks/ledger.jsonl`).
+
+  The 2.0.0 floor is set by agent identity, not by the ledger format: `who()` resolves display
+  names from the broker's `agent-registry.json`, and the `displayName` and `aliases` fields it
+  reads were added by broker T14 in 2.0.0. Against an older broker the registry lookup finds
+  nothing and every agent silently falls back to this file's built-in `AGENT_MAP` — which is the
+  inconsistency (`SPECTRE` vs `ECHO`) that reading the registry exists to fix. The renderers are
+  a weaker constraint: `authority-override` is a 2.0.0 event, but `corrupt` dates to broker
+  1.2.0, so the renderers alone would not have forced 2.0.0.
 
 ---
 
@@ -59,11 +69,38 @@ python3 <interagent-queue>/scripts/interagent_queue.py peek
 
 To decouple concerns and ensure multi-platform flexibility (e.g. running under separate user accounts, home directories, or containers), all operational locations resolve dynamically relative to home environments — nothing is hardcoded to a host path:
 
-- **State Document:** `$LYRA_WORKSPACE/state/callbacks/queue_state.json` tracks cursor indexing (`last_processed_line`) and live enabled status.
-- **Active Ledger Source:** `$CLAW_HOME/state/callbacks/ledger.jsonl` (provided by `miab-broker`).
+- **State Document:** `$LYRA_WORKSPACE/state/callbacks/queue_state.json` tracks cursor indexing
+  (`last_processed_line`) and live enabled status (overrideable via `CLAW_QUEUE_STATE`). If this
+  file exists but cannot be parsed, the observer exits `1` rather than rewinding the cursor —
+  see §4.
+- **Active Ledger Source:** `$CLAW_HOME/state/callbacks/ledger.jsonl` (provided by `miab-broker`,
+  overrideable via `CLAW_LEDGER`).
+- **Agent Registry:** `$CLAW_HOME/state/callbacks/agent-registry.json` (read-only, provided by
+  `miab-broker`, overrideable via `CLAW_REGISTRY`). Authoritative source for agent display names.
 - **Target Log File:** `$CLAW_HOME/logs/interagent-queue.log` (overrideable via `CLAW_QUEUE_LOG`).
 
 ---
+
+## 4. Failure Behaviour
+
+The observer is a cursor over an append-only ledger, so its dangerous failure is not crashing —
+it is **rewinding**. A cursor that silently returns to 0 replays every ledger record that has
+ever existed into the log, and duplicated output is harder to notice, and harder to undo, than
+no output at all.
+
+So the state file is treated as load-bearing:
+
+| Condition | Behaviour |
+|---|---|
+| `queue_state.json` absent | Genuine fresh start. Cursor begins at 0. |
+| `queue_state.json` present but unparseable, not a JSON object, or carrying a `last_processed_line` that is not a non-negative integer | **Exit `1`** with `{"ok": false, ...}` on stderr. The cursor is never rewound and nothing is written to the log. |
+
+Recovery is deliberate and belongs to the operator: inspect the file, repair it to the last known
+good `last_processed_line`, or delete it to accept a full replay.
+
+Two related guarantees, unchanged: `peek` never advances the cursor or writes to the log, and
+`process` advances the cursor only once the batch has been delivered — or when the sweep produced
+nothing to deliver.
 
 ## Quick Reference
 

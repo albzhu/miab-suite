@@ -133,15 +133,47 @@ def who(name):
     return AGENT_MAP.get(canonical, name)
 
 # --------------------------------------------------------------------------- state
+def _refuse_unusable_state(p: Path, reason: str) -> None:
+    """Exit 1 rather than silently resetting the cursor. See load_state()."""
+    print(json.dumps({
+        "ok": False,
+        "error": f"state file unusable: {reason}",
+        "state_file": str(p),
+        "refusing": "resetting the cursor here would replay the entire ledger into the log",
+        "remedy": "inspect the file, then repair it or delete it to start a fresh sweep",
+    }, indent=2), file=sys.stderr)
+    sys.exit(1)
+
+
 def load_state() -> dict:
+    """Load the sweep cursor and the live toggle.
+
+    A MISSING state file is a genuine fresh start, and `last_processed_line: 0`
+    is the right answer for it.
+
+    An UNUSABLE one is not, and must never be treated as one. Until 1.3.0 this
+    function swallowed every exception and fell through to that same fresh-start
+    default, so a corrupt or truncated queue_state.json silently rewound the
+    cursor to 0 and the next `process` replayed the ENTIRE ledger into the log —
+    the failure mode duplicated the output this observer exists to produce, which
+    is worse than not running at all. Fail closed instead and let the operator
+    repair or remove the file deliberately.
+    """
     p = state_file()
     p.parent.mkdir(parents=True, exist_ok=True)
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {"enabled": False, "last_processed_line": 0}
+    if not p.exists():
+        return {"enabled": False, "last_processed_line": 0}
+    try:
+        state = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        _refuse_unusable_state(p, str(e))
+    if not isinstance(state, dict):
+        _refuse_unusable_state(p, f"expected a JSON object, found {type(state).__name__}")
+    cursor = state.get("last_processed_line", 0)
+    if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+        _refuse_unusable_state(
+            p, f"last_processed_line must be a non-negative integer, found {cursor!r}")
+    return state
 
 def save_state(state: dict) -> None:
     p = state_file()
