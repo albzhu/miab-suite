@@ -8,7 +8,18 @@ repository combine (ADR-001 Phase 1, 2026-08-26), whose earliest commit postdate
 The 1.2.0 section below was therefore reconstructed by diffing the published package
 (`interagent-queue-1.2.0.zip`, sha256 `8865544e…9ef0`) against the tree, not from history.
 
-## 1.3.0 — "Registry identity, and a cursor that refuses to rewind"
+## 1.3.0 — "Registry identity, and a cursor that refuses to rewind" — FINAL under this name
+
+> **This skill is renamed to `miab-observer` and continues there at 2.0.0.** 1.3.0 is the last
+> release published as `interagent-queue`. Skill identity is keyed on the frontmatter `name`, so
+> installs cannot follow a rename — `miab-observer` must be installed deliberately, and the
+> script moved from `scripts/interagent_queue.py` to `scripts/miab_observer.py`, so cron
+> `--command` lines need updating. On-disk state is keyed on `CLAW_HOME` / `LYRA_WORKSPACE` and
+> carries over untouched. Migration steps are at the top of SKILL.md.
+>
+> Entries below this line, and the 1.2.0 entry, describe releases that shipped as
+> `interagent-queue`. They are left under that name deliberately: they are a record of what was
+> published, not of what the skill is called now.
 
 First release since the skill entered version control, and the first published from the combined
 `miab-broker` + `interagent-queue` repository.

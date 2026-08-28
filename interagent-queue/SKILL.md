@@ -1,6 +1,6 @@
 ---
 name: "interagent-queue"
-description: "Observe the MIAB transaction ledger: render callback events to a human-readable log, and optionally post closed-bottle summaries to a chat target. Requires miab-broker as a prerequisite."
+description: "DEPRECATED — renamed to `miab-observer`. This is the final release under the name `interagent-queue`; install `miab-observer` to keep receiving updates. Observe the MIAB transaction ledger: render callback events to a human-readable log, and optionally post closed-bottle summaries to a chat target. Requires miab-broker."
 permissions:
   env: [CLAW_HOME, LYRA_WORKSPACE, CLAW_LEDGER, CLAW_QUEUE_STATE, CLAW_QUEUE_LOG, CLAW_REGISTRY,
         CLAW_CLOSED_TARGET, CLAW_CLOSED_STATE, CLAW_CLOSED_ACCOUNT]
@@ -19,6 +19,34 @@ permissions:
     # nothing but the local filesystem.
     - "openclaw message send (delegated subprocess; destination set by CLAW_CLOSED_TARGET)"
 ---
+
+> ## ⚠️ This skill has been renamed to `miab-observer`
+>
+> **1.3.0 is the final release under the name `interagent-queue`.** Development continues as
+> **`miab-observer`**, starting at 2.0.0.
+>
+> **Skill identity is keyed on the frontmatter `name`, so this install cannot follow the rename
+> on its own.** No update to `interagent-queue` will ever become `miab-observer` — you have to
+> install the new skill deliberately. This notice is the only signal you will get, which is why
+> this release exists at all.
+>
+> **To migrate:**
+> 1. Install `miab-observer` 2.0.0.
+> 2. Point your cron entries at the new path. The script was renamed too:
+>    `scripts/interagent_queue.py` → `scripts/miab_observer.py`. **An existing cron `--command`
+>    line will keep invoking the old path and will silently stop working once you remove this
+>    skill.**
+> 3. Your state carries over untouched. `queue_state.json`, `closed_bottle_state.json`, the log
+>    and the broker's ledger are all keyed on `CLAW_HOME` / `LYRA_WORKSPACE`, not on the skill
+>    name, so the cursor and dedup state survive. No replay, no re-delivery.
+> 4. Remove `interagent-queue`.
+>
+> **Why the rename.** The name described a queue; the skill is an observer over the broker's
+> ledger and never queues anything. `miab-observer` also pairs it with `miab-broker`, which is
+> the skill it cannot run without.
+>
+> **Upgrade regardless of the rename:** 1.3.0 fixes a cursor bug that replayed the entire ledger
+> on a corrupt state file — live since 1.2.0 on 2026-07-22. See CHANGELOG.md.
 
 # Interagent Queue — Asynchronous Transaction Observer
 
