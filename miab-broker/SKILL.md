@@ -24,7 +24,7 @@ directory, with nothing scoped out of it in prose.
 
 That became true by construction in ADR-001 T23: the two closed-bottle notifier scripts that used
 to sit in `scripts/` — `notify_closed_bottles.py`, which shells out to `openclaw message send`, and
-its `notify_closed_dryrun.py` companion — now live in the `interagent-queue` reader, where the
+its `notify_closed_dryrun.py` companion — now live in the `miab-observer` reader, where the
 delivery sink belongs and where `network` is declared for it. Nothing here reaches the network, and
 nothing here reads the `CLAW_CLOSED_*` environment.
 
@@ -76,7 +76,7 @@ functional id. An agent that self-identifies by persona (returning as `ECHO` rat
 `reviewer`) will miss the registry — register the persona as well, or use functional ids
 consistently in `--from` / `--to`.
 
-The sibling `interagent-queue` skill keeps its own copy of this mapping for log rendering.
+The sibling `miab-observer` skill keeps its own copy of this mapping for log rendering.
 
 ---
 
@@ -112,7 +112,7 @@ python3 <miab-broker>/scripts/bin/claw-callback.py register \
   --alias ECHO --display-name "🥷👁️ ECHO (Reviewer)"
 ```
 
-An alias may not shadow another agent's own name, and may not point at two agents — both are refused. `--display-name` is the human-facing label; the `interagent-queue` observer reads it from here rather than keeping its own copy.
+An alias may not shadow another agent's own name, and may not point at two agents — both are refused. `--display-name` is the human-facing label; the `miab-observer` observer reads it from here rather than keeping its own copy.
 
 `--agent-id` is checked against `^agent:[a-z0-9_-]+$`. A value that doesn't match (a logical name pasted into the routing slot, say) is still stored — refusing would strand existing registries — but `register` returns a `warnings` array saying so, because wakes sent to a non-routing id go nowhere silently.
 
@@ -256,7 +256,7 @@ Envelopes are **deleted on completion** (`resolve`/reaped) — only the one-line
 
 A **resume** object accepts exactly four keys — `summary` (string), `steps` (list of strings), `expects` (string), `integrate` (string). Anything else is rejected.
 
-Ledger records are one JSON object per line: `{at, id, event, by, …}` where `event` is one of `create`, `forward`, `return`, `resolve`, `cancel`, `fail`, `corrupt`, `authority-override`. The sibling `interagent-queue` skill parses this file — treat the field names as a compatibility contract, and note that adding an event type without adding a renderer there makes it *invisible* rather than an error.
+Ledger records are one JSON object per line: `{at, id, event, by, …}` where `event` is one of `create`, `forward`, `return`, `resolve`, `cancel`, `fail`, `corrupt`, `authority-override`. The sibling `miab-observer` skill parses this file — treat the field names as a compatibility contract, and note that adding an event type without adding a renderer there makes it *invisible* rather than an error.
 
 `authority-override` records a call that the §4a rules would have refused and that was forced through: `{id, event: "authority-override", by, action, expected, stack_remaining?}`. It is written *in addition to* the normal event, never instead of it.
 

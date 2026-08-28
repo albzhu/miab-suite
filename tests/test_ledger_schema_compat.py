@@ -1,10 +1,10 @@
 """
 Hard constraint: the ledger.jsonl record schema must not change in a way
-that breaks the interagent-queue reader skill, which parses it directly
-(interagent-queue/scripts/interagent_queue.py, in this repo). New optional keys are
+that breaks the miab-observer reader skill, which parses it directly
+(miab-observer/scripts/miab_observer.py, in this repo). New optional keys are
 fine; renaming or removing existing ones is not.
 
-This runs interagent_queue.py's `peek` command against a scratch ledger
+This runs miab_observer.py's `peek` command against a scratch ledger
 produced by claw-callback.py to confirm it still parses cleanly.
 """
 import json
@@ -16,7 +16,7 @@ from pathlib import Path
 from conftest import CB_SCRIPT, IQ_SCRIPT, REPO_ROOT, parse_json
 
 
-def test_interagent_queue_parses_scratch_ledger(run_cb, claw_home):
+def test_miab_observer_parses_scratch_ledger(run_cb, claw_home):
 
     r = run_cb("create", "--task", "cross-skill schema check", "--from", "main",
                "--to", "planner", "--summary", "s")
@@ -30,11 +30,11 @@ def test_interagent_queue_parses_scratch_ledger(run_cb, claw_home):
                              capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
-    assert out["messages"], "interagent_queue should have rendered at least one event"
+    assert out["messages"], "miab_observer should have rendered at least one event"
     assert "Enqueued Task" in out["messages"][0]
 
 
-def test_interagent_queue_renders_corrupt_event(run_cb, claw_home):
+def test_miab_observer_renders_corrupt_event(run_cb, claw_home):
     """The `corrupt` event (T6) is appended by quarantine_envelope() when list/sweep
     move a bad envelope aside. format_event() must render it rather than silently
     dropping it (returning None) like it does for any other unrecognised event —
@@ -76,7 +76,7 @@ def test_interagent_queue_renders_corrupt_event(run_cb, claw_home):
 
 
 def _peek(claw_home):
-    """Run interagent_queue.py peek against this scratch CLAW_HOME."""
+    """Run miab_observer.py peek against this scratch CLAW_HOME."""
     env = os.environ.copy()
     env["CLAW_HOME"] = str(claw_home)
     env["LYRA_WORKSPACE"] = str(claw_home / "workspace")
@@ -86,7 +86,7 @@ def _peek(claw_home):
     return json.loads(result.stdout)
 
 
-def test_interagent_queue_renders_authority_override_event(run_cb, claw_home):
+def test_miab_observer_renders_authority_override_event(run_cb, claw_home):
     """Coupling rule (T15 x Q10): `authority-override` is a NEW event type. An event
     type with no renderer returns None from format_event() and is dropped by
     collect_new() — invisible, not broken. That already happened once with `corrupt`

@@ -1,6 +1,10 @@
 # Changelog
 
-All notable changes to the `interagent-queue` skill are recorded here.
+All notable changes to the `miab-observer` skill are recorded here.
+
+**This skill was published as `interagent-queue` through 1.3.0** and renamed at 2.0.0. Entries
+for 1.3.0 and 1.2.0 keep the old name throughout: they record what was actually published under
+it. Renaming them retroactively would falsify the provenance the 1.2.0 entry exists to establish.
 
 This file starts at 1.3.0. Version **1.2.0** was published to ClawHub on **2026-07-22** from a
 working copy that was not under version control — `interagent-queue` only entered git with the
@@ -8,7 +12,43 @@ repository combine (ADR-001 Phase 1, 2026-08-26), whose earliest commit postdate
 The 1.2.0 section below was therefore reconstructed by diffing the published package
 (`interagent-queue-1.2.0.zip`, sha256 `8865544e…9ef0`) against the tree, not from history.
 
-## 1.3.0 — "Registry identity, and a cursor that refuses to rewind" — FINAL under this name
+## 2.0.0 — "miab-observer"
+
+### Changed
+
+- **Renamed from `interagent-queue` to `miab-observer`.** The old name described a queue; the
+  skill is an observer over the broker's ledger and never queues anything. `miab-observer` also
+  pairs it with `miab-broker`, which it cannot run without, and matches that skill's 2.0.0.
+
+  **This is a breaking change and the reason for the major bump.** Skill identity is keyed on the
+  frontmatter `name`, so an install of `interagent-queue` cannot become `miab-observer` by
+  updating — it has to be installed deliberately. `interagent-queue` 1.3.0 was published as a
+  final deprecation release carrying the migration notice, because it was the only channel that
+  could reach the existing install base.
+
+- **`scripts/interagent_queue.py` → `scripts/miab_observer.py`.** This is the change most likely
+  to bite: a cron entry whose `--command` points at the old path keeps working until
+  `interagent-queue` is removed, then fails silently. Update cron before removing the old skill.
+
+### Not changed, deliberately
+
+- **All on-disk state keeps its existing names and locations.** `queue_state.json`,
+  `closed_bottle_state.json`, `$CLAW_HOME/logs/interagent-queue.log` and the broker's
+  `ledger.jsonl` are keyed on `CLAW_HOME` / `LYRA_WORKSPACE`, never on the skill name, so the
+  cursor and dedup state carry across the rename untouched. **Nothing replays and nothing is
+  re-delivered.**
+
+  This was not free to leave alone — it is why the log file still says `interagent-queue`.
+  Renaming the state files would have reset the cursor, and a reset cursor replays the whole
+  ledger into the log: exactly the bug 1.3.0 was released to fix. Renaming
+  `closed_bottle_state.json` would have been worse, re-posting every closed-bottle summary to the
+  configured chat target. A tidier filename is not worth either. Set `CLAW_QUEUE_LOG` to rename
+  the log yourself.
+
+- **`AGENT_MAP`, the renderers and the ledger contract are untouched.** 2.0.0 is a rename, not a
+  rewrite. The broker floor stays at miab-broker 2.0.0 for the reasons in Prerequisites.
+
+## 1.3.0 — "Registry identity, and a cursor that refuses to rewind" — final release as `interagent-queue`
 
 > **This skill is renamed to `miab-observer` and continues there at 2.0.0.** 1.3.0 is the last
 > release published as `interagent-queue`. Skill identity is keyed on the frontmatter `name`, so

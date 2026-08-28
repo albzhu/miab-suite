@@ -2,7 +2,7 @@
 
 Standing invariant (ADR-001, and the reason these two skills now share a repo):
 every event type `claw-callback.py` can append to ledger.jsonl must have a
-renderer in `interagent_queue.py`. `format_event()` returns None for an
+renderer in `miab_observer.py`. `format_event()` returns None for an
 unrecognised type and `collect_new()` drops Nones, so a missing renderer is
 *silent* -- the event simply never appears in the log or the Discord-facing
 feed. That has bitten twice already, which is why the writer's list is derived

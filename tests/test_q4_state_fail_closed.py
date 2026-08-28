@@ -1,6 +1,6 @@
 """The reader's cursor must never rewind silently (MQ Q4).
 
-interagent_queue.py is a cursor over an append-only ledger, so its dangerous
+miab_observer.py is a cursor over an append-only ledger, so its dangerous
 failure is not crashing — it is rewinding. Until 1.3.0, load_state() swallowed
 every exception and fell through to the same
 `{"enabled": False, "last_processed_line": 0}` default it uses for a genuine
@@ -24,7 +24,7 @@ from conftest import IQ_SCRIPT
 
 
 def _status(claw_home, state_text=None):
-    """Run `interagent_queue.py status`, optionally seeding queue_state.json first."""
+    """Run `miab_observer.py status`, optionally seeding queue_state.json first."""
     ws = claw_home / "workspace"
     if state_text is not None:
         d = ws / "state" / "callbacks"

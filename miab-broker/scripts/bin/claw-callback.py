@@ -191,7 +191,7 @@ def agent_key(name) -> str:
 
 def display_name(logical_name: str, reg: Optional[dict] = None) -> str:
     """Human-facing name for an agent: registry displayName, else the canonical key,
-    else whatever we were given. Read by the interagent-queue observer. (T14 / Q9)"""
+    else whatever we were given. Read by the miab-observer observer. (T14 / Q9)"""
     key, entry = resolve_agent(logical_name, reg)
     if entry and entry.get("displayName"):
         return entry["displayName"]
@@ -1020,7 +1020,7 @@ def main():
                             "(repeatable). Lookups are case-insensitive. (T14)")
     reg_p.add_argument("--display-name", dest="display_name",
                        help="human-facing name for logs and chat output (e.g. 'ECHO (Reviewer)'). "
-                            "Read by the interagent-queue observer.")
+                            "Read by the miab-observer observer.")
     reg_p.add_argument("--description", help="human-readable description of this agent")
     reg_p.set_defaults(func=cmd_register)
 

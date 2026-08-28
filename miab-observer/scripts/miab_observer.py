@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-interagent_queue — live transaction observer and file logger for the MIAB callback ledger.
+miab_observer — live transaction observer and file logger for the MIAB callback ledger.
 
 PREREQUISITE: Requires the `miab-broker` skill to be installed and active.
 It tails the append-only callback ledger (state/callbacks/ledger.jsonl) managed by miab-broker,
@@ -47,6 +47,9 @@ def log_file() -> Path:
     env = os.environ.get("CLAW_QUEUE_LOG")
     if env:
         return Path(env).expanduser()
+    # Deliberately still "interagent-queue.log" after the 2.0.0 rename. Renaming it would
+    # start a second log beside the user's existing one, orphan the first, and break any
+    # rotation or shipping pointed at that path. State names do not follow the skill name.
     return claw_home() / "logs" / "interagent-queue.log"
 
 def check_prerequisites() -> tuple[bool, str]:

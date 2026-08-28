@@ -1,4 +1,4 @@
-# miab-broker + interagent-queue
+# miab-broker + miab-observer
 
 Two OpenClaw skills that share one file and therefore share one repository.
 
@@ -11,10 +11,10 @@ unconditionally. See [`ADR-001`](#design-decisions) for the full reasoning.
 | directory | skill | role |
 |---|---|---|
 | [`miab-broker/`](miab-broker/) | `miab-broker` | **writer** — the broker CLI. Creates, forwards, returns, resolves and reaps callbacks; appends every event to the ledger. |
-| [`interagent-queue/`](interagent-queue/) | `interagent-queue` | **reader** — renders each ledger event into a human-readable log. |
+| [`miab-observer/`](miab-observer/) | `miab-observer` | **reader** — renders each ledger event into a human-readable log. |
 | [`tests/`](tests/) | — | one suite, resolving both trees. No skip paths. |
 
-Install either skill on its own; `interagent-queue` requires `miab-broker` to be present, since it
+Install either skill on its own; `miab-observer` requires `miab-broker` to be present, since it
 has nothing to read otherwise.
 
 ## What a bottle is
@@ -56,11 +56,11 @@ exists to catch.
 ## Layout note — do not add a root `SKILL.md`
 
 Skills are discovered by walking directories for `SKILL.md`. If the **repository root** has one that
-parses, the loader treats the root as the one and only skill and never descends — `interagent-queue`
+parses, the loader treats the root as the one and only skill and never descends — `miab-observer`
 would silently stop loading. The root deliberately has no `SKILL.md`, and this README is not one.
 
 Verify with `openclaw skills list --verbose` that exactly one `miab-broker` and one
-`interagent-queue` load, and that both resolve to this repository. Skill identity is keyed on the
+`miab-observer` load, and that both resolve to this repository. Skill identity is keyed on the
 frontmatter `name`, not the path, so a stale copy elsewhere shadows or is shadowed with no warning.
 
 ## Design decisions

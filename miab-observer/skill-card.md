@@ -1,6 +1,4 @@
 ## Description: <br>
-**DEPRECATED — renamed to `miab-observer`.** 1.3.0 is the final release under this name; install `miab-observer` 2.0.0 to keep receiving updates. Installs cannot follow a rename automatically. <br>
-
 Monitor and log MIAB transaction ledger events to a file. Requires miab-broker as a prerequisite. <br>
 
 This skill is ready for commercial/non-commercial use. <br>
@@ -28,7 +26,8 @@ Mitigation: Verify miab-broker 2.0.0 or later is installed and initialized, then
 
 
 ## Reference(s): <br>
-- [ClawHub skill page](https://clawhub.ai/albzhu/skills/interagent-queue) <br>
+- [ClawHub skill page](https://clawhub.ai/albzhu/skills/miab-observer) <br>
+- [Previous listing, published as `interagent-queue` through 1.3.0](https://clawhub.ai/albzhu/skills/interagent-queue) <br>
 
 
 ## Skill Output: <br>
@@ -38,7 +37,8 @@ Mitigation: Verify miab-broker 2.0.0 or later is installed and initialized, then
 **Other Properties Related to Output:** [Writes queue state and log files under configurable CLAW_* paths and requires an existing miab-broker ledger. The optional message sink also delivers summaries to a chat target via `openclaw message send`.] <br>
 
 ## Skill Version(s): <br>
-1.3.0 (current — final under this name; continues as `miab-observer` 2.0.0) <br>
+2.0.0 (current — renamed from `interagent-queue`) <br>
+1.3.0 (published 2026-08-28 as `interagent-queue`; final under that name) <br>
 1.2.0 (published 2026-07-22) <br>
 
 ## Ethical Considerations: <br>

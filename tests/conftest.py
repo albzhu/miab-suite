@@ -21,9 +21,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]          # the combined repo root
 BROKER_ROOT = REPO_ROOT / "miab-broker"                  # the writer skill
-IQ_ROOT = REPO_ROOT / "interagent-queue"                 # the reader skill
+IQ_ROOT = REPO_ROOT / "miab-observer"                    # the reader skill
 CB_SCRIPT = BROKER_ROOT / "scripts" / "bin" / "claw-callback.py"
-IQ_SCRIPT = IQ_ROOT / "scripts" / "interagent_queue.py"
+IQ_SCRIPT = IQ_ROOT / "scripts" / "miab_observer.py"
 
 # Both skills live in this repo. A missing one is a broken checkout, not a
 # reason to skip: the whole point of combining the trees (ADR-001) was to make

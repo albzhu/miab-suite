@@ -18,7 +18,7 @@ delivery target; run it from a `--command` (non-agent) cron job, never an agentT
 Read-only over the ledger: never mutates ledger.jsonl or envelope files. The
 only files it writes are its own state file (cursor + toggle).
 
-Path resolution (mirrors interagent_queue.py's conventions):
+Path resolution (mirrors miab_observer.py's conventions):
   - CLAW_HOME              : broker root                 (default: ~/.openclaw)
   - CLAW_LEDGER            : explicit ledger path         (overrides CLAW_HOME/state/callbacks/ledger.jsonl)
   - CLAW_CLOSED_STATE      : explicit state-file path     (overrides CLAW_HOME/state/callbacks/closed_bottle_state.json)
