@@ -5,7 +5,10 @@ All notable changes to the `miab-broker` skill are recorded here.
 ## 2.0.0 — first ClawHub publish (2026-08-27; program unchanged since the 2026-08-19 tag)
 
 No change to the shipping program. `scripts/bin/claw-callback.py`, `scripts/reap-callbacks.sh`
-and `SECURITY.md` are byte-identical to the `v2.0.0` tag (`de4aeba`, 2026-08-19); everything in
+and `SECURITY.md` are unchanged in behaviour from the `v2.0.0` tag (`de4aeba`, 2026-08-19).
+`reap-callbacks.sh` and `SECURITY.md` are byte-identical to it; `claw-callback.py` differs by
+exactly two docstring lines, which name the companion skill and were updated when it was renamed
+`interagent-queue` → `miab-observer`. No executable line differs. Everything in
 this section is repository, packaging or documentation work done since that tag, republished
 under the same version because the code a user installs is the same code. ClawHub has never
 served 2.0.0 — it is still on 1.3.0 — so this is that version's first publication, not a
