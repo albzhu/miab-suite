@@ -1,10 +1,18 @@
 ---
 name: miab-broker
-description: Operate the Message-in-a-Bottle (MIAB) LIFO callback stack — the async inter-agent transport that lets agents delegate work, yield their turn, and get woken when results return instead of CPU-idling on poll loops. Use when registering wake paths, creating/forwarding/returning/resolving callbacks, or invoking the callback reaper.
+description: Operate the Message-in-a-Bottle (MIAB) LIFO callback stack — the async inter-agent transport that lets agents delegate work, yield their turn, and get woken when results return instead of CPU-idling on poll loops. Use when registering wake paths, creating/forwarding/returning/resolving callbacks, invoking the callback reaper, or checking that openclaw.json and the agent registry are set up correctly (`doctor`).
 permissions:
-  env: [CLAW_HOME, CALLBACK_TTL_MIN]
+  # OPENCLAW_CONFIG overrides the config location for `doctor`; OPENCLAW_WORKSPACE_ROOT is
+  # read only to expand ${...} path vars found inside openclaw.json; CLAW_CLOSED_TARGET is
+  # read (never set) so `doctor` can tell whether the sibling interagent-queue notifier
+  # would fail closed. None of them affect protocol behaviour.
+  env: [CLAW_HOME, CALLBACK_TTL_MIN, OPENCLAW_CONFIG, OPENCLAW_WORKSPACE_ROOT, CLAW_CLOSED_TARGET]
   file_read:
     - "$CLAW_HOME/state/callbacks/**"
+    # Read-only, and only by `doctor`. openclaw.json is where agents.list declares the
+    # functional ids this skill routes on and the persona names agents answer to; the
+    # gap between the two is the failure `doctor` exists to catch. Never written.
+    - "$CLAW_HOME/openclaw.json"
   file_write:
     - "$CLAW_HOME/state/callbacks/**"
     - "$CLAW_HOME/logs/callback-reaper.log"
@@ -83,6 +91,8 @@ The sibling `miab-observer` skill keeps its own copy of this mapping for log ren
 ## 2. Callback Lifecycle (the `claw-callback.py` CLI)
 
 The CLI is the single source of truth. **Every command prints a `next_step`** telling you exactly what to do next — follow it.
+
+**If you are setting this up for the first time, or wakes are going missing, start with `doctor` (§2j).** It reads `openclaw.json`, compares it against the agent registry, and prints the exact `register` calls that make delegation work.
 
 Invoke it at `scripts/bin/claw-callback.py`, resolved against wherever this skill is installed for you (written `<miab-broker>` below). You only need to supply that path on your *first* call: every `next_step` and `dispatch_message` the CLI prints back already contains its own absolute path, valid from any working directory.
 
@@ -216,6 +226,67 @@ python3 <miab-broker>/scripts/bin/claw-callback.py list --json   # programmatic
 
 Reports a `quarantined` count if any unreadable envelopes were moved aside during the scan (see §4).
 
+### j) `doctor` — check the ensemble is configured correctly
+
+The broker routes on **functional ids**; `openclaw.json` is where those ids live, and where
+each agent's persona `name` is declared. The gap between the two is the most expensive
+failure this skill has on record — the production ledger shows wakes addressed to `SPECTRE`
+and `ECHO` missing a registry keyed on `planner` and `reviewer`, and 16% of delegations
+dying silently as a result. Every one of those was visible in `openclaw.json` before a
+bottle was ever created.
+
+`doctor` reconciles three sources — `openclaw.json` (who exists, what they are called),
+`agent-registry.json` (how wakes are routed), and the ledger (who you actually delegate to)
+— and prints the **minimum** set of `register` calls that close the gap.
+
+```bash
+python3 <miab-broker>/scripts/bin/claw-callback.py doctor
+python3 <miab-broker>/scripts/bin/claw-callback.py doctor --json           # machine-readable
+python3 <miab-broker>/scripts/bin/claw-callback.py doctor --commands-only  # just the fixes
+```
+
+| flag | effect |
+|---|---|
+| `--config <path>` | config location (default `$CLAW_HOME/openclaw.json`, or `$OPENCLAW_CONFIG`) |
+| `--agents a,b,c` | check exactly these agents instead of inferring the set |
+| `--all` | check every agent in `agents.list`, not only the ones in use |
+| `--json` | structured findings, for a calling agent to act on |
+| `--commands-only` | print only the `register` lines, one per line, ready to run |
+
+It also checks the **environment declared in `openclaw.json`** — see §7. Missing a
+required variable is `blocking`, because the skill that needs it fails closed rather
+than degrading. A variable found in the shell but not in the config is downgraded to a
+warning with the reason stated: the gateway launches agents itself, so a shell export
+is invisible to a cron-fired wake.
+
+**Scope: only the agents that need to be routable.** By default `doctor` derives its set from
+evidence the broker already owns — names in the ledger, holders of live bottles, and existing
+registry entries. An agent declared in `agents.list` that you have never delegated to is
+reported as `info: not-used` and gets no proposal. `--agents` states the set explicitly;
+`--all` widens it to the whole roster. On a cold start with no ledger, `doctor` says so and
+falls back to the agents `bindings[]` shows can receive traffic.
+
+**Findings are graded.** `blocking` means the protocol cannot work at all — `tools.agentToAgent`
+disabled (every command still succeeds on disk and no wake is ever delivered), the skill
+switched off in `skills.entries`, a required environment variable undeclared, or the two
+skills pointed at different `CLAW_HOME` roots. `routing` means bottles
+will strand — an unregistered agent, a persona that is not an alias, or an `agentId` that is
+not a routing id. `warning` and `info` are advisory. Exit is non-zero if anything is `blocking`
+or `routing`.
+
+**`doctor` never writes `openclaw.json`.** Where a config change is genuinely required it
+prints a merge-ready fragment and stops. Registry repairs are emitted as `register` commands
+for you to run — and they are emitted in an order that works: `register --alias` deliberately
+refuses to absorb an entry whose `agentId` differs from the target's, so when a persona has
+been registered as its own agent, `doctor` emits the `agentId` correction first.
+
+A clean run:
+
+```
+Configuration is correct for miab-broker: every agent the broker routes to is declared,
+registered, and reachable under both its functional id and its persona name.
+```
+
 ---
 
 ## 3. State, Files & Envelope Schema
@@ -231,6 +302,8 @@ All broker state lives under `$CLAW_HOME/state/callbacks/` — `CLAW_HOME` defau
 | `archive/corrupt/<id>.json` | `list`/`sweep` | quarantined unreadable envelopes |
 | `archive/` (other files) | — | **not written by this skill.** Anything here that isn't `cb-*.json` was put there by something else; the broker neither reads nor removes it |
 | `$CLAW_HOME/logs/callback-reaper.log` | `reap-callbacks.sh` | reaper run log |
+| `<miab-broker>/openclaw.template.json` | — | reference config shape, shipped with the skill. Read by you, not by the CLI (§7) |
+| `$CLAW_HOME/openclaw.json` | **read-only, `doctor` only** | gateway config: `agents.list` ids and persona names, `tools.agentToAgent`, skill loading. Never written |
 
 Envelopes are **deleted on completion** (`resolve`/reaped) — only the one-line ledger summary persists.
 
@@ -339,13 +412,81 @@ scripts/reap-callbacks.sh --dry-run       # report only, change nothing
 | `register` returns `warnings: [… does not look like a routing id …]` | A logical name was passed to `--agent-id` | Pass the routable handle (`agent:<slug>`), not the nicename |
 | `callback … is resolved, cannot forward` | Bottle already terminal | Start a new bottle; terminal states are final |
 | `list` reports quarantined envelopes | An envelope was unreadable and moved to `archive/corrupt/` | Inspect it there; the `corrupt` ledger event records why |
+| `doctor` reports `agent-to-agent-disabled` | `tools.agentToAgent.enabled` is not true. Commands write state and no wake is ever delivered | Enable it in `openclaw.json` and restart the gateway |
+| `doctor` reports `persona-not-aliased` | An agent answers to its `openclaw.json` `name` but the registry only knows its id | Run the `register --alias` line `doctor` printed |
+| `doctor` reports `persona-registered-separately` | A persona name was registered as its own agent alongside the real one | Run both printed lines **in order** — the `agentId` fix must land first |
+| `doctor` reports `env-missing` | A required variable is not in `skills.entries[].env` | Merge the fragment `doctor` printed; see §7 |
+| `doctor` reports `env-shell-only` | Set in your shell but not in the config. A cron-fired wake will not see it | Move it into `skills.entries[].env` |
+| `doctor` reports `claw-home-disagreement` | The two skills declare different `CLAW_HOME` roots; the observer reads a ledger the broker never writes | Make them identical, or omit from both |
+| `doctor` says `openclaw.json not found` | `CLAW_HOME` does not contain the gateway config | Pass `--config <path>` or set `$OPENCLAW_CONFIG` |
 | Bottle sits `pending` far longer than expected | Wake never delivered, or holder never returned | `show --id` to see the holder, then re-`wake`; there is no automatic redelivery yet |
 
 ---
 
+---
+
+## 7. Configuration (`openclaw.json`)
+
+`openclaw.template.json` sits beside this file. It is the minimum config shape that
+lets the broker and the `interagent-queue` observer work to full capacity — merge the
+keys you need into your existing config rather than replacing it, then run `doctor`.
+It carries a `_miab_broker_template` block documenting each requirement; delete that
+key before use.
+
+### Why environment lives here and not in a `.env`
+
+Both skills read `os.environ` directly, and **neither loads a dotenv file**. The
+gateway is what launches agents, so a value exported in your shell is invisible to a
+wake fired by cron — which is the path that matters most, because it is how an agent
+is resurfaced when a bottle comes back. `skills.entries[].env` is the only route that
+covers every way an agent can be started.
+
+```jsonc
+"skills": {
+  "entries": {
+    "miab-broker":      { "env": { "CLAW_HOME": "${HOME}/.openclaw",
+                                   "CALLBACK_TTL_MIN": "120" } },
+    "interagent-queue": { "env": { "CLAW_HOME": "${HOME}/.openclaw",
+                                   "LYRA_WORKSPACE": "${HOME}/.openclaw/workspace",
+                                   "CLAW_CLOSED_TARGET": "agent:main:discord:channel:<id>" } }
+  }
+}
+```
+
+| variable | skill | required? | notes |
+|---|---|---|---|
+| `CLAW_HOME` | both | no | State root. Defaults to `~/.openclaw`. **If both skills declare it, the values must match** — mismatched roots mean the observer reads a ledger the broker never writes to, and neither side errors |
+| `CALLBACK_TTL_MIN` | broker | no | Reaper threshold in minutes, default 120. Measure before scheduling the reaper on it (§5) |
+| `CLAW_CLOSED_TARGET` | queue | **yes**, for the message sink | Delivery destination for closed-bottle summaries. The notifier exits 1 and posts nothing without it — deliberately, so an unconfigured install can never inherit someone else's channel. The log sink does not need it |
+| `LYRA_WORKSPACE` | queue | no | Queue state root, default `~/.openclaw/workspace` |
+| `CLAW_LEDGER`, `CLAW_REGISTRY`, `CLAW_QUEUE_STATE`, `CLAW_QUEUE_LOG`, `CLAW_CLOSED_STATE`, `CLAW_CLOSED_ACCOUNT` | queue | no | Individual path overrides. Setting these piecemeal is how the reader and writer end up on different files |
+| `OPENCLAW_CONFIG` | broker | no | Config location for `doctor`, if not `$CLAW_HOME/openclaw.json` |
+| `OPENCLAW_WORKSPACE_ROOT` | broker | no | Read only to expand `${...}` inside `openclaw.json`. Falls back to `$CLAW_HOME` |
+
+### What the broker actually requires of the rest of the config
+
+- `tools.agentToAgent.enabled: true` — the transport `dispatch_message` rides. **False
+  looks exactly like success**: every command writes its state correctly and no wake is
+  ever delivered, so bottles accumulate as `pending` until the reaper fails them.
+- `skills.load.extraDirs` contains the directory holding the skill folders.
+- `plugins.allow` contains `agent-skills` — **unverified**. That plugin is present in the
+  one deployment we have observed, and skills load there, but we have not established
+  that it is required: `commands.nativeSkills` and `plugins.bundledDiscovery` are also in
+  the loading path, and the plugin id may differ across openclaw versions. `doctor` raises
+  it as a warning that says so. The authoritative check is `openclaw skills list
+  --verbose` — if that shows `miab-broker` enabled, your loading path works and the
+  warning is noise.
+- `agents.list[]` declares each agent's `id` (what the broker routes on) and `name`
+  (the persona it answers to). Declaring both is necessary but **not sufficient** —
+  you must also register the persona as an alias, or a return from `SPECTRE` misses a
+  registry keyed on `planner`. `doctor --commands-only` prints those calls.
+- At least one `bindings[]` entry for the origin agent. `doctor` also derives
+  `CLAW_CLOSED_TARGET` candidates from `bindings[]`.
+
 ## Quick Reference
 
 ```
+doctor    → check openclaw.json + registry; print the exact fixes   (first, and when wakes vanish)
 register  → enable an agent's wake path, + --alias / --display-name (once per agent)
 create    → push first resume frame, dispatch, END TURN          (caller)
 wake      → emit the exact cron dispatch call for a bottle       (after create/forward)

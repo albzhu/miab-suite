@@ -2,6 +2,77 @@
 
 All notable changes to the `miab-broker` skill are recorded here.
 
+## 2.1.0 — configuration preflight (unreleased)
+
+### Added
+
+- **`doctor` — reconcile `openclaw.json` against the agent registry (T25).** The broker routes
+  on functional ids (`planner`), while agents self-identify by the persona `name` declared in
+  `openclaw.json` (`SPECTRE`). That gap is the most expensive failure on record here: the
+  production ledger shows wakes addressed to `SPECTRE` (×5) and `ECHO` (×1) missing the
+  registry, `spectre` registered with `agentId: "planner"` — a logical name in the routing slot
+  — and 16% of delegations dying with no `return`. All of it was derivable from `openclaw.json`
+  before a single bottle was created.
+
+  `doctor` reads three sources — `openclaw.json`, `agent-registry.json`, and the ledger — and
+  prints the minimum set of `register` calls that make delegation work. Findings are graded
+  `blocking` / `routing` / `warning` / `info`; exit is non-zero on the first two.
+
+  - Scope is evidence-based. The proposal set is derived from names in the ledger, holders of
+    live bottles, and existing registry entries. A declared agent the broker has never routed
+    to is reported `info: not-used` and gets no proposal. `--agents a,b,c` states the set
+    explicitly, `--all` widens it to the whole roster, and a cold start with no ledger says so
+    and falls back to the agents `bindings[]` shows can receive traffic.
+  - Repair commands are emitted in an order that works. `register --alias` refuses to absorb an
+    entry whose `agentId` differs from the target's, so when a persona has been registered as
+    its own agent the `agentId` correction is emitted first. Covered by a test that runs every
+    emitted command and re-runs `doctor` to confirm it comes back clean.
+  - `--json` for a calling agent, `--commands-only` for a shell.
+
+- **Deliberately *not* asserted: `agent-skills` as a hard requirement.** It appears in
+  `plugins.allow` in the one deployment we have observed and skills load there, but that
+  is a single observation, not a verified requirement — `commands.nativeSkills` and
+  `plugins.bundledDiscovery` are also in the loading path. `doctor` raises it as a warning
+  that names its own uncertainty and points at `openclaw skills list --verbose`, which is
+  the check that actually settles it. It is in `openclaw.template.json` labelled the same
+  way. A blocking finding that turns out to be wrong tells people their working install is
+  broken, which is worse than not checking.
+
+- **`blocking` detection for `tools.agentToAgent.enabled` being false.** This was previously
+  invisible and looks like success: every command writes its state correctly and no wake is
+  ever delivered, so bottles accumulate as `pending` until the reaper fails them.
+
+- **`openclaw.template.json`** — the minimum config shape for a working install,
+  shipped beside `SKILL.md` and referenced by `doctor` whenever a config change is
+  needed, so the resident AI has a correct shape to copy rather than inventing one. A
+  test asserts the template provokes no blocking finding and no proposed fragment: the
+  reference config has to pass the checks it is the reference for.
+
+- **Environment is checked, and belongs in `openclaw.json`.** `doctor` reconciles
+  `skills.entries[].env` against what each skill actually reads. A missing required
+  variable is `blocking` (the queue's notifier fails closed without
+  `CLAW_CLOSED_TARGET`); a variable found in the shell but not the config is a warning,
+  because the gateway launches agents itself and a shell export is invisible to a
+  cron-fired wake. New `claw-home-disagreement` check: the two skills declaring
+  different `CLAW_HOME` roots is otherwise silent — the observer reads a ledger the
+  broker never writes to, and neither side errors.
+
+  A `.env` was prototyped and **retracted**: nothing in either skill loads a dotenv
+  file, so it would have been documentation masquerading as configuration, and it does
+  not cover the cron path at all. See §7 of `SKILL.md`.
+
+### Changed
+
+- **Permissions widened, and declared.** `file_read` now includes `$CLAW_HOME/openclaw.json`,
+  and `env` adds `OPENCLAW_CONFIG`, `OPENCLAW_WORKSPACE_ROOT` and `CLAW_CLOSED_TARGET` (all
+  read, none set). `doctor` **never writes `openclaw.json`** — where a config change is
+  required it prints a merge-ready fragment and stops. `network: []` is unaffected.
+
+### Tests
+
+- `tests/test_t25_doctor.py` (19 cases) and `tests/fixtures/openclaw.template.json`, the
+  reference config trimmed to the keys `doctor` reads. Suite: 132 passed, 1 xfailed.
+
 ## 2.0.0 — first ClawHub publish (2026-08-27; program unchanged since the 2026-08-19 tag)
 
 No change to the shipping program. `scripts/bin/claw-callback.py`, `scripts/reap-callbacks.sh`

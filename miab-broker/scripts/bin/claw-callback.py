@@ -34,12 +34,13 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import sys
 from pathlib import Path
 from typing import Optional
 
-VERSION = "2.0.0"   # string semver, matching CHANGELOG.md — not a float
+VERSION = "2.1.0"   # string semver, matching CHANGELOG.md — not a float
 
 # Script identity, used to make every emitted command copy-pasteable from any cwd. (T2)
 SELF = Path(__file__).resolve()
@@ -927,6 +928,578 @@ def cmd_sweep(args):
 
 
 # --------------------------------------------------------------------------- parser
+# ------------------------------------------------------------------ doctor (T25)
+# The broker routes on functional ids. `openclaw.json` is where those ids live, and
+# where each agent's persona `name` is declared -- and the gap between the two is the
+# single most expensive failure this codebase has on record: the production ledger
+# shows wakes addressed to `SPECTRE` and `ECHO` missing a registry keyed on `planner`
+# and `reviewer`, and 16% of delegations dying silently as a result. Every miss is a
+# stranded bottle, a human retry, and a full re-prime of an agent's context.
+#
+# `doctor` reconciles three sources -- openclaw.json (who exists, what they are
+# called), agent-registry.json (how wakes are routed), and the ledger (who the broker
+# actually delegates to) -- and proposes the MINIMUM set of `register` calls that make
+# delegation work. It reads openclaw.json and never writes it: config repair is the one
+# operation where a wrong automated write costs more than the manual paste saves.
+
+CONFIG_ENV = "OPENCLAW_CONFIG"
+
+# The reference config shipped beside this skill. `doctor` points at it whenever a
+# config-level change is needed, so the resident AI has a correct shape to copy from
+# rather than inventing one.
+TEMPLATE_PATH = SELF.parents[2] / "openclaw.template.json"
+
+# What each skill needs in `skills.entries.<name>.env`, and whether it fails without it.
+#
+# This lives in openclaw.json rather than a .env because the gateway is what launches
+# agents: a value exported in a shell is invisible to a wake fired by cron, which is
+# the path that matters most here. Nothing in either skill loads a dotenv file.
+SKILL_ENV = {
+    "miab-broker": {
+        "CLAW_HOME": ("optional", "broker state root; defaults to ~/.openclaw"),
+        "CALLBACK_TTL_MIN": ("optional", "reaper age threshold in minutes; defaults to 120"),
+    },
+    "interagent-queue": {
+        "CLAW_CLOSED_TARGET": ("required", "delivery destination for closed-bottle summaries; "
+                                           "the notifier exits 1 and posts nothing without it"),
+        "CLAW_HOME": ("optional", "must resolve to the same root the broker writes to"),
+        "LYRA_WORKSPACE": ("optional", "queue state root; defaults to ~/.openclaw/workspace"),
+    },
+}
+
+# ${HOME}, ${OPENCLAW_WORKSPACE_ROOT} and friends appear throughout openclaw.json
+# paths. Expanded best-effort: an unresolvable var is left verbatim so the report
+# shows the user what the config literally says rather than a silently empty path.
+_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def expand_vars(s):
+    if not isinstance(s, str):
+        return s
+
+    def _sub(m):
+        name = m.group(1)
+        val = os.environ.get(name)
+        if val:
+            return val
+        if name == "OPENCLAW_WORKSPACE_ROOT":
+            return str(root_dir())
+        return m.group(0)
+
+    return os.path.expanduser(_VAR_RE.sub(_sub, s))
+
+
+def _is_ancestor(parent, child) -> bool:
+    try:
+        Path(child).resolve().relative_to(Path(parent).expanduser().resolve())
+        return True
+    except (ValueError, OSError, RuntimeError):
+        return False
+
+
+def config_path(override: Optional[str] = None) -> Path:
+    if override:
+        return Path(override).expanduser().resolve()
+    env = os.environ.get(CONFIG_ENV)
+    if env:
+        return Path(env).expanduser().resolve()
+    return root_dir() / "openclaw.json"
+
+
+def load_openclaw_config(override: Optional[str] = None):
+    """(config_dict, path, error_message). Exactly one of dict/error is None."""
+    p = config_path(override)
+    if not p.exists():
+        return None, p, (f"openclaw.json not found at {p}. Pass --config <path> or set "
+                         f"${CONFIG_ENV} if your gateway config lives elsewhere.")
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError as e:
+        return None, p, f"cannot read {p}: {e}"
+    try:
+        cfg = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return None, p, (f"{p} is not valid JSON (line {e.lineno}, column {e.colno}): "
+                         f"{e.msg}. The gateway will not be running this config either.")
+    if not isinstance(cfg, dict):
+        return None, p, f"{p} does not contain a JSON object at the top level"
+    return cfg, p, None
+
+
+def config_agents(cfg: dict) -> dict:
+    """canonical id -> the raw agents.list[] entry."""
+    out = {}
+    for a in ((cfg.get("agents") or {}).get("list") or []):
+        if isinstance(a, dict) and a.get("id"):
+            out[canon(a["id"])] = a
+    return out
+
+
+def persona_index(cagents: dict) -> dict:
+    """canonical persona name -> canonical functional id, for names that differ.
+
+    This is the map that closes the registry-miss hole: agents self-identify by
+    `name` (SPECTRE) while the registry is keyed on `id` (planner).
+    """
+    out = {}
+    for aid, entry in cagents.items():
+        nm = entry.get("name")
+        if nm and canon(nm) != aid and canon(nm) not in cagents:
+            out[canon(nm)] = aid
+    return out
+
+
+def session_key_candidates(cfg: dict) -> dict:
+    """canonical agent id -> session keys implied by bindings[].
+
+    Used only to sanity-check a registered --session-key against a binding that
+    actually exists. The segment layout mirrors the observed
+    `agent:main:discord:channel:<id>` form; treat a candidate as a suggestion to
+    verify, never as authoritative.
+    """
+    out = {}
+    for b in (cfg.get("bindings") or []):
+        if not isinstance(b, dict):
+            continue
+        aid, match = b.get("agentId"), (b.get("match") or {})
+        ch, peer = match.get("channel"), (match.get("peer") or {})
+        pid = peer.get("id")
+        if aid and ch and pid:
+            out.setdefault(canon(aid), []).append(f"agent:{canon(aid)}:{ch}:channel:{pid}")
+    return out
+
+
+def ledger_agents() -> dict:
+    """canonical agent name -> times it appears in the ledger.
+
+    This is the evidence base for "as needed": an agent the broker has never routed
+    to or from does not need a registry entry, and doctor proposes nothing for it.
+    """
+    seen = {}
+    p = ledger_path()
+    if not p.exists():
+        return seen
+    try:
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            for field in ("by", "to", "from", "wake", "holder"):
+                v = rec.get(field)
+                if isinstance(v, str) and v.strip():
+                    k = canon(v)
+                    seen[k] = seen.get(k, 0) + 1
+    except OSError:
+        pass
+    return seen
+
+
+def live_bottle_agents() -> set:
+    """Agents named by an in-flight envelope. They must stay routable or the bottle strands."""
+    out = set()
+    try:
+        for p in cb_dir().glob("cb-*.json"):
+            try:
+                env = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(env, dict):
+                continue
+            for f in ("createdBy", "holder"):
+                v = env.get(f)
+                if isinstance(v, str) and v.strip():
+                    out.add(canon(v))
+            for frame in (env.get("stack") or []):
+                v = (frame or {}).get("agent") if isinstance(frame, dict) else None
+                if isinstance(v, str) and v.strip():
+                    out.add(canon(v))
+    except OSError:
+        pass
+    return out
+
+
+def _register_cmd(agent, agent_id, aliases=None, display=None, session_key=None) -> str:
+    parts = [f"register --agent {shlex.quote(agent)} --agent-id {shlex.quote(agent_id)}"]
+    for a in (aliases or []):
+        parts.append(f"--alias {shlex.quote(a)}")
+    if display:
+        parts.append(f"--display-name {shlex.quote(display)}")
+    if session_key:
+        parts.append(f"--session-key {shlex.quote(session_key)}")
+    return self_cmd(" ".join(parts))
+
+
+LEVELS = ("blocking", "routing", "warning", "info")
+LEVEL_ICON = {"blocking": "✗", "routing": "✗", "warning": "!", "info": "·"}
+
+
+def cfg_entry_name(e: dict) -> str:
+    return e.get("name") or e.get("id") or "?"
+
+
+def cmd_doctor(args):
+    """Reconcile openclaw.json against the agent registry and the ledger. (T25)"""
+    findings = []
+    commands = []
+    template = {}
+
+    def add(level, code, message, fix=None, agent=None):
+        f = {"level": level, "code": code, "message": message}
+        if agent:
+            f["agent"] = agent
+        if fix:
+            f["fix"] = fix
+        findings.append(f)
+
+    cfg, cpath, cerr = load_openclaw_config(args.config)
+    if cerr:
+        add("blocking", "config-unreadable", cerr,
+            fix=f"Point --config or ${CONFIG_ENV} at the live openclaw.json, or repair its JSON.")
+        _doctor_output(args, str(cpath), findings, commands, template, cold_start=False)
+        sys.exit(1)
+
+    cagents = config_agents(cfg)
+    personas = persona_index(cagents)
+    sess_cands = session_key_candidates(cfg)
+    reg = load_registry()
+    regagents = reg.get("agents", {}) or {}
+
+    # --- transport ---------------------------------------------------------------
+    # Without agentToAgent every command still succeeds on disk and nothing is ever
+    # delivered: bottles accumulate as `pending` and the reaper eventually fails them.
+    a2a = ((cfg.get("tools") or {}).get("agentToAgent") or {})
+    if a2a.get("enabled") is not True:
+        add("blocking", "agent-to-agent-disabled",
+            "tools.agentToAgent.enabled is not true. dispatch_message has no transport: "
+            "create/forward/return all write state successfully and no wake is ever "
+            "delivered, so every bottle strands as `pending`.",
+            fix="Enable the agent-to-agent tool (fragment below).")
+        template.setdefault("tools", {})["agentToAgent"] = {"enabled": True}
+
+    if not cagents:
+        add("blocking", "no-agents",
+            "agents.list is empty or missing — there is nobody to delegate to.",
+            fix="Declare at least an origin agent and one delegate in agents.list.")
+
+    # --- skill loading -----------------------------------------------------------
+    plugins = cfg.get("plugins") or {}
+    # NOTE ON EVIDENCE. `agent-skills` is present in the one reference deployment we
+    # have seen, and skills load there. We have NOT established that it is required --
+    # `commands.nativeSkills` and `plugins.bundledDiscovery` are also in the loading
+    # path and may cover it, and the plugin id may differ across openclaw versions.
+    # So this is a warning that names its own uncertainty, not a blocking assertion.
+    # The definitive check is `openclaw skills list --verbose`; if that shows
+    # miab-broker enabled, this finding is noise and can be ignored.
+    if "agent-skills" not in (plugins.get("allow") or []):
+        add("warning", "agent-skills-not-allowed",
+            "plugins.allow does not include 'agent-skills'. In the reference deployment "
+            "that plugin is present and skills load; whether it is strictly required in "
+            "your openclaw version is unverified.",
+            fix="Confirm with `openclaw skills list --verbose` that miab-broker is enabled. "
+                "If it is, ignore this. If it is not, adding 'agent-skills' to plugins.allow "
+                "is the first thing to try.")
+    if ((plugins.get("entries") or {}).get("agent-skills") or {}).get("enabled") is False:
+        add("warning", "agent-skills-disabled",
+            "plugins.entries['agent-skills'].enabled is false, and 'agent-skills' is what "
+            "the reference deployment loads skills through.",
+            fix="Set it to true if `openclaw skills list --verbose` does not show miab-broker.")
+
+    skills = cfg.get("skills") or {}
+    sk_entries = skills.get("entries") or {}
+    skill_dir = SELF.parents[2]          # <container>/miab-broker/scripts/bin/x.py
+    for nm in ("miab-broker", "interagent-queue"):
+        e = sk_entries.get(nm)
+        if isinstance(e, dict) and e.get("enabled") is False:
+            lvl = "blocking" if nm == "miab-broker" else "warning"
+            add(lvl, "skill-disabled",
+                f"skills.entries['{nm}'].enabled is false — the skill is installed but "
+                f"switched off.", fix=f"Set skills.entries['{nm}'].enabled to true, or remove the entry.")
+            template.setdefault("skills", {}).setdefault("entries", {})[nm] = {"enabled": True}
+
+    scan_dirs = [expand_vars(d) for d in ((skills.get("load") or {}).get("extraDirs") or [])]
+    scan_dirs += [expand_vars(d) for d in ((plugins.get("load") or {}).get("paths") or [])]
+    if scan_dirs and not any(_is_ancestor(d, skill_dir) for d in scan_dirs):
+        add("warning", "skill-dir-not-scanned",
+            f"This skill is installed at {skill_dir}, which is not under any configured "
+            f"skills.load.extraDirs / plugins.load.paths entry ({', '.join(scan_dirs)}). "
+            f"It may be loading from a bundled default — or not at all.",
+            fix=f"Add the parent of the skill directory to skills.load.extraDirs, or confirm "
+                f"with `openclaw skills list --verbose` that miab-broker is enabled.")
+
+    # --- environment, declared in openclaw.json -----------------------------------
+    # skills.entries[].env is the only route that covers a cron-fired wake. A value
+    # that exists only in a shell will be missing exactly when an agent is woken.
+    installed = {"miab-broker": True,
+                 "interagent-queue": (skill_dir.parent / "interagent-queue").is_dir()}
+    declared_home = {}
+    for sk_name, wanted in SKILL_ENV.items():
+        if not installed.get(sk_name):
+            continue
+        env_block = ((sk_entries.get(sk_name) or {}).get("env") or {})
+        if "CLAW_HOME" in env_block:
+            declared_home[sk_name] = expand_vars(env_block["CLAW_HOME"])
+        for var, (need, why) in wanted.items():
+            if env_block.get(var):
+                continue
+            in_shell = bool(os.environ.get(var))
+            if need == "required":
+                suggestion = ""
+                if var == "CLAW_CLOSED_TARGET" and sess_cands.get("main"):
+                    suggestion = f" A binding for 'main' implies {sess_cands['main'][0]!r}."
+                add("blocking" if not in_shell else "warning",
+                    "env-missing" if not in_shell else "env-shell-only",
+                    (f"{var} is not declared in skills.entries['{sk_name}'].env"
+                     + (" (it is set in this shell, but the gateway launches agents itself, so a "
+                        "cron-fired wake will not see it)" if in_shell else "")
+                     + f". {why}." + suggestion),
+                    fix=f"Declare it in skills.entries['{sk_name}'].env (fragment below).")
+                template.setdefault("skills", {}).setdefault("entries", {}) \
+                        .setdefault(sk_name, {}).setdefault("env", {})[var] = (
+                    os.environ.get(var) or (sess_cands.get("main", [""])[0]
+                                            if var == "CLAW_CLOSED_TARGET" else "REPLACE_ME"))
+            elif in_shell:
+                add("info", "env-shell-only",
+                    f"{var} is set in this shell but not in skills.entries['{sk_name}'].env. "
+                    f"Agents started by the gateway will use the default instead.",
+                    fix=f"Declare it in skills.entries['{sk_name}'].env if the override is intentional.")
+
+    # Two skills pointed at different roots is silent: the broker writes bottles the
+    # observer never sees, and neither reports an error.
+    if len(set(declared_home.values())) > 1:
+        add("blocking", "claw-home-disagreement",
+            "miab-broker and interagent-queue declare different CLAW_HOME values ("
+            + ", ".join(f"{k}={v!r}" for k, v in sorted(declared_home.items()))
+            + "). The observer reads a ledger the broker never writes to, and neither "
+              "side reports an error.",
+            fix="Make both skills' CLAW_HOME identical, or omit it from both and take the default.")
+
+    # --- who actually needs to be routable ---------------------------------------
+    if args.agents:
+        raw_needed = {canon(a) for a in args.agents.split(",") if canon(a)}
+        basis = "--agents"
+    elif args.all:
+        raw_needed = set(cagents)
+        basis = "--all (every agent in agents.list)"
+    else:
+        raw_needed = set(ledger_agents()) | live_bottle_agents() | {canon(k) for k in regagents}
+        basis = "delegation history (ledger + live bottles + existing registry)"
+
+    cold_start = not raw_needed and not args.agents and not args.all
+    if cold_start:
+        # No evidence yet. Bindings tell us which agents can receive user traffic, so
+        # one of them is the origin -- a defensible starter set, flagged as a guess.
+        raw_needed = set(sess_cands)
+        basis = "bindings[] (no delegation history yet \u2014 starter set)"
+        add("info", "cold-start",
+            "The ledger is empty and the registry is unpopulated, so there is no evidence "
+            "of which agents you delegate to. Proposing only the agents that bindings[] "
+            "shows can receive traffic. Use --agents a,b,c to name your ensemble, or --all.")
+
+    # Fold persona spellings onto the functional id that owns them before checking
+    # anything. Without this a single misconfigured agent reports twice and the two
+    # findings contradict each other -- 'SPECTRE' as a routing error and 'planner' as
+    # an unused agent, for one agent that is simply mis-registered.
+    reg_keys = {canon(k) for k in regagents}
+    needed, unknown = set(), set()
+    for raw in raw_needed:
+        owner = raw if raw in cagents else personas.get(raw)
+        if owner is None:
+            unknown.add(raw)
+        else:
+            needed.add(owner)
+
+    for raw in sorted(unknown):
+        if raw in reg_keys:
+            add("warning", "orphan-registry-entry",
+                f"Registry entry {raw!r} matches no agent id and no persona name in agents.list. "
+                f"Wakes routed to it reach an agent the gateway does not know about.", agent=raw,
+                fix="Remove the entry, or restore the agent in agents.list.")
+        else:
+            add("warning", "unknown-agent",
+                f"{raw!r} appears in broker state but is neither an agents.list id nor any "
+                f"agent's persona name \u2014 a retired agent, or a typo in a --to/--from.",
+                agent=raw, fix="Correct the caller, or add the agent to agents.list.")
+
+    unused = sorted(set(cagents) - needed)
+
+    # --- per-agent reconciliation -------------------------------------------------
+    for name in sorted(needed):
+        cfg_entry = cagents[name]
+        persona = cfg_entry.get("name")
+        want_id = f"agent:{name}"
+        alias_args = [persona] if (persona and canon(persona) != name) else []
+        key, entry = resolve_agent(name, reg)
+
+        # A registry entry filed under the persona name as though it were its own
+        # agent. This is the production `spectre` entry, which carried
+        # `agentId: "planner"` alongside a separate, correct `planner`.
+        stale = None
+        if persona and canon(persona) != name:
+            for rk, rv in regagents.items():
+                if canon(rk) == canon(persona):
+                    stale = (rk, rv)
+                    break
+
+        if stale:
+            rk, rv = stale
+            rid = rv.get("agentId") or ""
+            bad = not AGENT_ID_RE.match(rid)
+            add("routing", "persona-registered-separately",
+                f"{rk!r} is registered as an agent in its own right, but openclaw.json declares it "
+                f"the persona of {name!r}"
+                + (f", and its agentId {rid!r} is not a routing id" if bad else "")
+                + ". Wakes split across two entries, and an authority check on an envelope "
+                  "recorded as " + repr(name) + " refuses the same agent returning as " + repr(rk) + ".",
+                agent=name, fix=f"Fold {rk!r} into {name!r} as an alias.")
+            # `register --alias` refuses to absorb an entry whose agentId differs from
+            # the target's -- that guard exists to stop two genuinely different agents
+            # being merged. Correct the stray entry's routing id first so the second
+            # call takes the absorb path instead of dying.
+            if rid != want_id:
+                commands.append(_register_cmd(rk, want_id))
+            commands.append(_register_cmd(name, want_id, aliases=[persona], display=persona))
+            continue
+
+        if entry is None:
+            add("routing", "unregistered",
+                f"{name!r} is declared in agents.list but has no registry entry. `wake` exits "
+                f"non-zero for it and the bottle stalls with no holder reachable.",
+                agent=name, fix="Register it.")
+            commands.append(_register_cmd(name, want_id, aliases=alias_args, display=persona))
+            continue
+
+        have_id = entry.get("agentId") or ""
+        needs_cmd = False
+        if have_id != want_id:
+            if not AGENT_ID_RE.match(have_id):
+                add("routing", "bad-agent-id",
+                    f"{name!r} is registered with agentId {have_id!r}, which is not a routing id. "
+                    f"Wakes are dispatched to it verbatim and go nowhere silently.",
+                    agent=name, fix=f"Re-register with {want_id!r}.")
+                needs_cmd = True
+            else:
+                add("warning", "agent-id-mismatch",
+                    f"{name!r} is registered as {have_id!r} but agents.list declares id "
+                    f"{cfg_entry['id']!r} (implying {want_id!r}). Deliberate remapping is fine; "
+                    f"a stale rename is not.", agent=name)
+
+        known = {canon(a) for a in (entry.get("aliases") or [])} | {canon(key)}
+        if persona and canon(persona) not in known:
+            add("routing", "persona-not-aliased",
+                f"{name!r} answers to persona {persona!r} in openclaw.json, but that name is not a "
+                f"registered alias. An agent that returns as {persona!r} misses the registry, and "
+                f"its authority check fails against an envelope recorded as {name!r}.",
+                agent=name, fix=f"Add {persona!r} as an alias.")
+            needs_cmd = True
+        elif persona and not entry.get("displayName"):
+            add("info", "no-display-name",
+                f"{name!r} has no displayName; interagent-queue falls back to its built-in map "
+                f"instead of the registry.", agent=name,
+                fix=f"Re-register with --display-name {persona!r}.")
+
+        if needs_cmd:
+            commands.append(_register_cmd(
+                name, want_id if not AGENT_ID_RE.match(have_id) else have_id,
+                aliases=alias_args, display=persona))
+
+        sk = entry.get("sessionKey")
+        if sk and sk not in sess_cands.get(name, []):
+            add("warning", "session-key-unverified",
+                f"{name!r} is registered with sessionKey {sk!r}, which matches no bindings[] entry "
+                f"for it. If that session no longer exists, every wake for {name!r} is delivered "
+                f"nowhere.", agent=name,
+                fix=(f"Verify the session, or use one of: {', '.join(sess_cands[name])}"
+                     if sess_cands.get(name) else "Verify the session still exists."))
+
+    for name in unused:
+        add("info", "not-used",
+            f"{name!r} ({cfg_entry_name(cagents[name])}) is declared in agents.list but the broker "
+            f"has never routed to it. No action needed.", agent=name)
+
+    _doctor_output(args, str(cpath), findings, commands, template, cold_start, basis)
+    if any(f["level"] in ("blocking", "routing") for f in findings):
+        sys.exit(1)
+
+
+def _doctor_output(args, cpath, findings, commands, template, cold_start, basis=None):
+    counts = {lvl: sum(1 for f in findings if f["level"] == lvl) for lvl in LEVELS}
+    ok = counts["blocking"] == 0 and counts["routing"] == 0
+    # De-duplicate proposals while preserving order: two findings on one agent
+    # (bad id *and* missing alias) collapse to a single register call.
+    seen, cmds = set(), []
+    for c in commands:
+        if c not in seen:
+            seen.add(c)
+            cmds.append(c)
+
+    if getattr(args, "json", False):
+        emit({
+            "ok": ok,
+            "config": cpath,
+            "basis": basis,
+            "counts": counts,
+            "findings": findings,
+            "commands": cmds,
+            **({"openclaw_json_fragment": template} if template else {}),
+            "next_step": _doctor_next_step(ok, counts, cmds, template),
+        })
+        return
+
+    if getattr(args, "commands_only", False):
+        for c in cmds:
+            print(c)
+        return
+
+    print(f"miab-broker doctor — config: {cpath}")
+    if basis:
+        print(f"scope: {basis}")
+    print()
+    for lvl in LEVELS:
+        group = [f for f in findings if f["level"] == lvl]
+        if not group:
+            continue
+        print(f"{lvl.upper()} ({len(group)})")
+        for f in group:
+            who = f" [{f['agent']}]" if f.get("agent") else ""
+            print(f"  {LEVEL_ICON[lvl]}{who} {f['message']}")
+            if f.get("fix"):
+                print(f"      → {f['fix']}")
+        print()
+    if cmds:
+        print("Run these to make routing correct (minimum set):")
+        for c in cmds:
+            print(f"  {c}")
+        print()
+    if template:
+        print("Merge this fragment into openclaw.json (doctor never writes it):")
+        print(json.dumps(template, indent=2))
+        print()
+    print(_doctor_next_step(ok, counts, cmds, template))
+
+
+def _doctor_next_step(ok, counts, cmds, template) -> str:
+    if ok and not cmds and not template:
+        return ("Configuration is correct for miab-broker: every agent the broker routes to is "
+                "declared, registered, and reachable under both its functional id and its persona "
+                "name. No action needed.")
+    bits = []
+    if template:
+        bits.append("merge the openclaw.json fragment above and restart the gateway "
+                    f"(reference shape: {TEMPLATE_PATH})")
+    if cmds:
+        bits.append(f"run the {len(cmds)} `register` command(s) above")
+    tail = ", then ".join(bits) if bits else "review the findings above"
+    return (f"{counts['blocking']} blocking, {counts['routing']} routing, "
+            f"{counts['warning']} warning finding(s). To fix: {tail}. "
+            f"Re-run `doctor` afterwards to confirm it comes back clean.")
+
+
 def add_resume_flags(p):
     p.add_argument("--summary", help="one-line: why you delegated / what you're waiting for")
     p.add_argument("--step", action="append", help="an ordered next-action on wake (repeatable)")
@@ -1028,6 +1601,19 @@ def main():
     wk.add_argument("--id", required=True, help="callback id")
     wk.add_argument("--to", help="override target agent (default: current holder)")
     wk.set_defaults(func=cmd_wake)
+
+    dr = sub.add_parser("doctor",
+                        help="check openclaw.json + registry are set up for the broker")
+    dr.add_argument("--config", help=f"path to openclaw.json (default: $CLAW_HOME/openclaw.json, "
+                                     f"or ${CONFIG_ENV})")
+    dr.add_argument("--agents", help="comma-separated agents to check, instead of inferring "
+                                     "the set from delegation history")
+    dr.add_argument("--all", action="store_true",
+                    help="check every agent in agents.list, not only the ones in use")
+    dr.add_argument("--json", action="store_true", help="machine-readable findings")
+    dr.add_argument("--commands-only", dest="commands_only", action="store_true",
+                    help="print only the register commands to run, one per line")
+    dr.set_defaults(func=cmd_doctor)
 
     args = ap.parse_args()
     try:
