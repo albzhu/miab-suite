@@ -67,6 +67,16 @@ All notable changes to the `miab-broker` skill are recorded here.
   file, so it would have been documentation masquerading as configuration, and it does
   not cover the cron path at all. See §7 of `SKILL.md`.
 
+- **`hops` means one thing now (T24).** Three contradictory definitions coexisted: the
+  CLI's `resolve` ledger event reported `len(results)` (which counts returns — and
+  `resolve --result` inflates it further), the retired notifier path counted ledger
+  lines, and the envelope carried nothing. The envelope now carries the canonical
+  counter — delegation edges traversed, `create` = 1, each `forward` +1 — and the
+  `resolve` event reports it. Envelopes written before 2.1.0 derive the count from
+  `history`, which records exactly one line per create/forward. Landed ahead of the
+  R2 reader merge so the merged renderer canonicalises the right definition; `stats`
+  (T20) becomes buildable on an honest number.
+
 ### Changed
 
 - **Permissions widened, and declared.** `file_read` now includes `$CLAW_HOME/openclaw.json`,
@@ -76,9 +86,9 @@ All notable changes to the `miab-broker` skill are recorded here.
 
 ### Tests
 
-- `tests/test_t25_doctor.py` (21 cases) and `tests/fixtures/openclaw.template.json`, the
+- `tests/test_t24_hops.py` (3 cases), `tests/test_t25_doctor.py` (21 cases) and `tests/fixtures/openclaw.template.json`, the
   reference config trimmed to the keys `doctor` reads (binding peer ids are synthetic —
-  live channel ids never enter committed text). Suite: 143 passed, 1 xfailed.
+  live channel ids never enter committed text). Suite: 146 passed, 1 xfailed.
 
 ## 2.0.0 — first ClawHub publish (2026-08-27; program unchanged since the 2026-08-19 tag)
 

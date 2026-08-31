@@ -559,6 +559,17 @@ def cmd_register(args):
     })
 
 
+def env_hops(env) -> int:
+    """T24 — the canonical hop count: delegation edges traversed, i.e. the `create`
+    plus every `forward`. Not `len(results)` (that counts returns, and resolve may
+    append one more) and not ledger lines. Envelopes written before 2.1.0 carry no
+    counter; history records exactly one line per create/forward, so derive it."""
+    h = env.get("hops")
+    if isinstance(h, int):
+        return h
+    return sum(1 for x in env.get("history", []) if x.get("action") in ("create", "forward"))
+
+
 def cmd_wake(args):
     """Look up the target agent and emit the exact cron call to wake them."""
     env = load(args.id)
@@ -636,6 +647,7 @@ def cmd_create(args):
         "stack": [{"agent": agent_key(args.frm), "resume": resume, "pushedAt": now_iso()}],
         "active": None,
         "results": [],
+        "hops": 1,
         "history": [{"at": now_iso(), "agent": args.frm, "action": "create",
                      "detail": f"delegate -> {args.to}"}],
     }
@@ -683,6 +695,7 @@ def cmd_forward(args):
     resume = build_resume(args)
     env["stack"].append({"agent": agent_key(args.frm), "resume": resume, "pushedAt": now_iso()})
     env["holder"] = agent_key(args.to)
+    env["hops"] = env_hops(env) + 1          # T24: one more delegation edge
     env["history"].append({"at": now_iso(), "agent": args.frm, "action": "forward",
                            "detail": f"delegate -> {args.to}"})
     save(env)
@@ -774,7 +787,7 @@ def cmd_resolve(args):
     env["history"].append({"at": now_iso(), "agent": args.frm, "action": "resolve"})
     ledger_append({
         "id": args.id, "event": "resolve", "by": args.frm,
-        "task": env.get("task"), "hops": len(env.get("results", [])),
+        "task": env.get("task"), "hops": env_hops(env),
         "result": env["results"][-1]["result"] if env.get("results") else None,
     })
     if overridden:
