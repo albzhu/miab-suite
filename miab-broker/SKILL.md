@@ -4,7 +4,7 @@ description: Operate the Message-in-a-Bottle (MIAB) LIFO callback stack — the 
 permissions:
   # OPENCLAW_CONFIG overrides the config location for `doctor`; OPENCLAW_WORKSPACE_ROOT is
   # read only to expand ${...} path vars found inside openclaw.json; CLAW_CLOSED_TARGET is
-  # read (never set) so `doctor` can tell whether the sibling interagent-queue notifier
+  # read (never set) so `doctor` can tell whether the sibling miab-observer notifier
   # would fail closed. None of them affect protocol behaviour.
   env: [CLAW_HOME, CALLBACK_TTL_MIN, OPENCLAW_CONFIG, OPENCLAW_WORKSPACE_ROOT, CLAW_CLOSED_TARGET]
   file_read:
@@ -428,7 +428,7 @@ scripts/reap-callbacks.sh --dry-run       # report only, change nothing
 ## 7. Configuration (`openclaw.json`)
 
 `openclaw.template.json` sits beside this file. It is the minimum config shape that
-lets the broker and the `interagent-queue` observer work to full capacity — merge the
+lets the broker and the `miab-observer` observer work to full capacity — merge the
 keys you need into your existing config rather than replacing it, then run `doctor`.
 It carries a `_miab_broker_template` block documenting each requirement; delete that
 key before use.
@@ -446,7 +446,7 @@ covers every way an agent can be started.
   "entries": {
     "miab-broker":      { "env": { "CLAW_HOME": "${HOME}/.openclaw",
                                    "CALLBACK_TTL_MIN": "120" } },
-    "interagent-queue": { "env": { "CLAW_HOME": "${HOME}/.openclaw",
+    "miab-observer": { "env": { "CLAW_HOME": "${HOME}/.openclaw",
                                    "LYRA_WORKSPACE": "${HOME}/.openclaw/workspace",
                                    "CLAW_CLOSED_TARGET": "agent:main:discord:channel:<id>" } }
   }

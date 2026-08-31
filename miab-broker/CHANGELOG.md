@@ -42,6 +42,12 @@ All notable changes to the `miab-broker` skill are recorded here.
   invisible and looks like success: every command writes its state correctly and no wake is
   ever delivered, so bottles accumulate as `pending` until the reaper fails them.
 
+- **The 2.0.0 rename is understood at the config level.** A `skills.entries` block still
+  keyed by the retired `interagent-queue` name is honoured for every check (that env is
+  what the install actually runs with) and raised as a `warning` naming the rename;
+  emitted config fragments always use `miab-observer`, so a fragment describes the end
+  state. Both keys present prefers `miab-observer` and flags the duplication.
+
 - **`openclaw.template.json`** — the minimum config shape for a working install,
   shipped beside `SKILL.md` and referenced by `doctor` whenever a config change is
   needed, so the resident AI has a correct shape to copy rather than inventing one. A
@@ -70,8 +76,9 @@ All notable changes to the `miab-broker` skill are recorded here.
 
 ### Tests
 
-- `tests/test_t25_doctor.py` (19 cases) and `tests/fixtures/openclaw.template.json`, the
-  reference config trimmed to the keys `doctor` reads. Suite: 132 passed, 1 xfailed.
+- `tests/test_t25_doctor.py` (21 cases) and `tests/fixtures/openclaw.template.json`, the
+  reference config trimmed to the keys `doctor` reads (binding peer ids are synthetic —
+  live channel ids never enter committed text). Suite: 143 passed, 1 xfailed.
 
 ## 2.0.0 — first ClawHub publish (2026-08-27; program unchanged since the 2026-08-19 tag)
 

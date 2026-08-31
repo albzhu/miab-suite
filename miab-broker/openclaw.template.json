@@ -1,13 +1,13 @@
 {
   "_miab_broker_template": {
     "DELETE_THIS_KEY_BEFORE_USE": "This block is documentation, not configuration. Remove it once you have merged what you need.",
-    "what_this_is": "The minimum openclaw.json shape that lets miab-broker + interagent-queue work to full capacity. Merge these keys into your existing config -- do not replace your config with this file. Run `claw-callback.py doctor` afterwards to confirm.",
+    "what_this_is": "The minimum openclaw.json shape that lets miab-broker + miab-observer work to full capacity. Merge these keys into your existing config -- do not replace your config with this file. Run `claw-callback.py doctor` afterwards to confirm.",
     "why_env_lives_here": "Both skills read os.environ directly. The gateway is what launches agents, so a value exported in your shell is invisible to a wake fired by cron. skills.entries[].env is the only route that covers every path an agent can be started on.",
     "the_one_thing_people_get_wrong": "The broker routes on agents.list[].id ('planner'). Agents self-identify by agents.list[].name ('SPECTRE'). The registry is keyed on id, so a return from SPECTRE misses it and the bottle strands. Declaring both here is not enough -- you must also register the persona as an alias. `doctor --commands-only` prints the exact calls.",
     "required": [
       "tools.agentToAgent.enabled -- the transport dispatch_message rides. False looks like success: every command writes state and no wake is ever delivered.",
       "skills.load.extraDirs must contain the directory holding the skill folders",
-      "skills.entries['interagent-queue'].env.CLAW_CLOSED_TARGET -- the notifier exits 1 without it"
+      "skills.entries['miab-observer'].env.CLAW_CLOSED_TARGET -- the notifier exits 1 without it"
     ],
     "about_the_plugins_block": "Copied from a working deployment, NOT verified as required. Skills may load in your openclaw version via commands.nativeSkills or plugins.bundledDiscovery instead. The authoritative check is `openclaw skills list --verbose` -- if miab-broker shows as enabled, you do not need this block.",
     "optional": "Every other env var below has a working default. Set one only to move a specific file; setting them piecemeal is how the reader and writer end up on different ledgers."
@@ -52,7 +52,7 @@
           "CALLBACK_TTL_MIN": "120"
         }
       },
-      "interagent-queue": {
+      "miab-observer": {
         "enabled": true,
         "env": {
           "CLAW_HOME": "${HOME}/.openclaw",

@@ -45,7 +45,7 @@ def with_env(cfg_path):
     known-unrelated blocking finding does not mask what they are asserting.
     """
     return patch(cfg_path, lambda d: d["skills"]["entries"].update({
-        "interagent-queue": {"env": {"CLAW_CLOSED_TARGET": "agent:main:discord:channel:123"}}}))
+        "miab-observer": {"env": {"CLAW_CLOSED_TARGET": "agent:main:discord:channel:123"}}}))
 
 
 def doctor(run_cb, config, *extra):
@@ -258,7 +258,7 @@ def test_missing_required_env_is_blocking(run_cb, config):
     out = parse_json(res.stdout)
     assert "env-missing" in codes(res)
     assert out["counts"]["blocking"] >= 1
-    frag = out["openclaw_json_fragment"]["skills"]["entries"]["interagent-queue"]["env"]
+    frag = out["openclaw_json_fragment"]["skills"]["entries"]["miab-observer"]["env"]
     assert "CLAW_CLOSED_TARGET" in frag
     # and the suggested value comes from a real binding, not a placeholder
     assert frag["CLAW_CLOSED_TARGET"].startswith("agent:main:discord:channel:")
@@ -276,7 +276,7 @@ def test_shell_only_env_is_downgraded_but_still_flagged(run_cb, config):
 
 def test_declared_env_satisfies_the_check(run_cb, config):
     patch(config, lambda d: d["skills"]["entries"].update({
-        "interagent-queue": {"env": {"CLAW_CLOSED_TARGET": "agent:main:discord:channel:123"}}}))
+        "miab-observer": {"env": {"CLAW_CLOSED_TARGET": "agent:main:discord:channel:123"}}}))
     assert "env-missing" not in codes(doctor(run_cb, config, "--all"))
 
 
@@ -284,7 +284,7 @@ def test_disagreeing_claw_home_is_blocking(run_cb, config):
     """The silent failure: broker writes one ledger, observer reads another."""
     patch(config, lambda d: d["skills"]["entries"].update({
         "miab-broker": {"env": {"CLAW_HOME": "/tmp/root-a"}},
-        "interagent-queue": {"env": {"CLAW_HOME": "/tmp/root-b",
+        "miab-observer": {"env": {"CLAW_HOME": "/tmp/root-b",
                                      "CLAW_CLOSED_TARGET": "agent:main:discord:channel:123"}}}))
     res = doctor(run_cb, config, "--all")
     assert "claw-home-disagreement" in codes(res)
@@ -294,7 +294,7 @@ def test_disagreeing_claw_home_is_blocking(run_cb, config):
 def test_matching_claw_home_is_fine(run_cb, config):
     patch(config, lambda d: d["skills"]["entries"].update({
         "miab-broker": {"env": {"CLAW_HOME": "/tmp/same"}},
-        "interagent-queue": {"env": {"CLAW_HOME": "/tmp/same",
+        "miab-observer": {"env": {"CLAW_HOME": "/tmp/same",
                                      "CLAW_CLOSED_TARGET": "agent:main:discord:channel:123"}}}))
     assert "claw-home-disagreement" not in codes(doctor(run_cb, config, "--all"))
 
@@ -319,3 +319,30 @@ def test_shipped_template_is_valid_json_and_self_documenting(run_cb):
     assert d["tools"]["agentToAgent"]["enabled"] is True
     # every agent carries both the routing id and the persona the registry needs aliased
     assert all("id" in a and "name" in a for a in d["agents"]["list"])
+
+
+# ------------------------------------------------------- legacy entry key (2.0.0 rename)
+def test_legacy_observer_entry_is_warned_but_honoured(run_cb, config):
+    """Pre-rename configs key the reader's entry by 'interagent-queue'. The env it
+    declares is what the install actually runs with, so it must satisfy the checks;
+    the stale key itself is a warning that names the rename and the settling command."""
+    def mut(d):
+        e = d["skills"]["entries"]
+        e.pop("miab-observer", None)
+        e["interagent-queue"] = {"env": {"CLAW_CLOSED_TARGET": "agent:main:discord:channel:123"}}
+    patch(config, mut)
+    cs = codes(doctor(run_cb, config, "--all"))
+    assert "legacy-observer-entry" in cs
+    assert "env-missing" not in cs           # the legacy env block is honoured
+    assert "duplicate-observer-entry" not in cs
+
+
+def test_duplicate_observer_entries_prefer_the_new_name(run_cb, config):
+    """Both keys present: 'miab-observer' wins, and the duplication is its own finding."""
+    patch(config, lambda d: d["skills"]["entries"].update({
+        "miab-observer": {"env": {"CLAW_CLOSED_TARGET": "agent:main:discord:channel:123"}},
+        "interagent-queue": {"env": {}}}))
+    cs = codes(doctor(run_cb, config, "--all"))
+    assert "duplicate-observer-entry" in cs
+    assert "legacy-observer-entry" not in cs
+    assert "env-missing" not in cs           # satisfied via the preferred entry

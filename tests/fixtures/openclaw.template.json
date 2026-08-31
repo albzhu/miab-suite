@@ -1,5 +1,5 @@
 {
-  "_comment": "Trimmed from Albert's production openclaw.json (2026-08-27). Only the keys `doctor` reads are kept: agents.list ids+names, tools.agentToAgent, plugins allow/entries, skills entries+load, bindings. Model/auth/channel blocks are dropped -- doctor never reads them, and they carry env: secret references.",
+  "_comment": "Trimmed from a production openclaw.json (2026-08-27); binding peer ids replaced with synthetic values. Only the keys `doctor` reads are kept: agents.list ids+names, tools.agentToAgent, plugins allow/entries, skills entries+load, bindings. Model/auth/channel blocks are dropped -- doctor never reads them, and they carry env: secret references.",
   "agents": {
     "list": [
       { "id": "main",     "name": "LYRA",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace" },
@@ -14,11 +14,11 @@
     ]
   },
   "bindings": [
-    { "agentId": "main",    "match": { "channel": "discord", "peer": { "id": "1516886003401490633", "kind": "group" } } },
-    { "agentId": "free",    "match": { "channel": "discord", "peer": { "id": "1514033375692984490", "kind": "group" } } },
-    { "agentId": "utility", "match": { "channel": "discord", "peer": { "id": "1494854792324059217", "kind": "group" } } },
-    { "agentId": "sigma",   "match": { "channel": "discord", "peer": { "id": "1498794912962052156", "kind": "group" } } },
-    { "agentId": "planner", "match": { "channel": "discord", "peer": { "id": "1515610649147998259", "kind": "group" } } }
+    { "agentId": "main",    "match": { "channel": "discord", "peer": { "id": "100000000000000001", "kind": "group" } } },
+    { "agentId": "free",    "match": { "channel": "discord", "peer": { "id": "100000000000000002", "kind": "group" } } },
+    { "agentId": "utility", "match": { "channel": "discord", "peer": { "id": "100000000000000003", "kind": "group" } } },
+    { "agentId": "sigma",   "match": { "channel": "discord", "peer": { "id": "100000000000000004", "kind": "group" } } },
+    { "agentId": "planner", "match": { "channel": "discord", "peer": { "id": "100000000000000005", "kind": "group" } } }
   ],
   "plugins": {
     "allow": ["acpx", "discord", "openrouter", "google", "anthropic", "litellm", "memory-core", "agent-skills", "deepseek"],

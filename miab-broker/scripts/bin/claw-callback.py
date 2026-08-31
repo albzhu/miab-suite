@@ -959,7 +959,7 @@ SKILL_ENV = {
         "CLAW_HOME": ("optional", "broker state root; defaults to ~/.openclaw"),
         "CALLBACK_TTL_MIN": ("optional", "reaper age threshold in minutes; defaults to 120"),
     },
-    "interagent-queue": {
+    "miab-observer": {
         "CLAW_CLOSED_TARGET": ("required", "delivery destination for closed-bottle summaries; "
                                            "the notifier exits 1 and posts nothing without it"),
         "CLAW_HOME": ("optional", "must resolve to the same root the broker writes to"),
@@ -1213,13 +1213,38 @@ def cmd_doctor(args):
     skills = cfg.get("skills") or {}
     sk_entries = skills.get("entries") or {}
     skill_dir = SELF.parents[2]          # <container>/miab-broker/scripts/bin/x.py
-    for nm in ("miab-broker", "interagent-queue"):
-        e = sk_entries.get(nm)
+
+    # The reader skill was renamed interagent-queue -> miab-observer in 2.0.0. Configs
+    # written before the rename still key skills.entries by the old name. Honour the
+    # legacy key for every check (the env it declares is real), but say so, and emit
+    # config fragments under the new name only, so a fragment always describes the end
+    # state. State filenames are unaffected -- they key on CLAW_HOME, not skill name.
+    LEGACY_OBSERVER = "interagent-queue"
+    observer_key = ("miab-observer" if "miab-observer" in sk_entries
+                    else LEGACY_OBSERVER if LEGACY_OBSERVER in sk_entries
+                    else "miab-observer")
+    if LEGACY_OBSERVER in sk_entries and "miab-observer" in sk_entries:
+        add("warning", "duplicate-observer-entry",
+            "skills.entries has both 'miab-observer' and the retired 'interagent-queue'. "
+            "These checks honour 'miab-observer' only; two entries can declare divergent env.",
+            fix="Merge any env only the 'interagent-queue' entry declares into 'miab-observer', "
+                "then delete the 'interagent-queue' entry.")
+    elif LEGACY_OBSERVER in sk_entries:
+        add("warning", "legacy-observer-entry",
+            "skills.entries is keyed by the retired name 'interagent-queue'; the reader skill "
+            "has been 'miab-observer' since 2.0.0. Its env is honoured by these checks, but "
+            "whether the loader still applies it to the renamed skill is unverified here.",
+            fix="Rename the skills.entries key to 'miab-observer' (keep the env block unchanged) "
+                "and confirm with `openclaw skills list --verbose`.")
+
+    for nm in ("miab-broker", "miab-observer"):
+        entry_key = observer_key if nm == "miab-observer" else nm
+        e = sk_entries.get(entry_key)
         if isinstance(e, dict) and e.get("enabled") is False:
             lvl = "blocking" if nm == "miab-broker" else "warning"
             add(lvl, "skill-disabled",
-                f"skills.entries['{nm}'].enabled is false — the skill is installed but "
-                f"switched off.", fix=f"Set skills.entries['{nm}'].enabled to true, or remove the entry.")
+                f"skills.entries['{entry_key}'].enabled is false — the skill is installed but "
+                f"switched off.", fix=f"Set skills.entries['{entry_key}'].enabled to true, or remove the entry.")
             template.setdefault("skills", {}).setdefault("entries", {})[nm] = {"enabled": True}
 
     scan_dirs = [expand_vars(d) for d in ((skills.get("load") or {}).get("extraDirs") or [])]
@@ -1236,12 +1261,14 @@ def cmd_doctor(args):
     # skills.entries[].env is the only route that covers a cron-fired wake. A value
     # that exists only in a shell will be missing exactly when an agent is woken.
     installed = {"miab-broker": True,
-                 "interagent-queue": (skill_dir.parent / "interagent-queue").is_dir()}
+                 "miab-observer": ((skill_dir.parent / "miab-observer").is_dir()
+                                   or (skill_dir.parent / "interagent-queue").is_dir())}
     declared_home = {}
     for sk_name, wanted in SKILL_ENV.items():
         if not installed.get(sk_name):
             continue
-        env_block = ((sk_entries.get(sk_name) or {}).get("env") or {})
+        entry_key = observer_key if sk_name == "miab-observer" else sk_name
+        env_block = ((sk_entries.get(entry_key) or {}).get("env") or {})
         if "CLAW_HOME" in env_block:
             declared_home[sk_name] = expand_vars(env_block["CLAW_HOME"])
         for var, (need, why) in wanted.items():
@@ -1273,7 +1300,7 @@ def cmd_doctor(args):
     # observer never sees, and neither reports an error.
     if len(set(declared_home.values())) > 1:
         add("blocking", "claw-home-disagreement",
-            "miab-broker and interagent-queue declare different CLAW_HOME values ("
+            "miab-broker and miab-observer declare different CLAW_HOME values ("
             + ", ".join(f"{k}={v!r}" for k, v in sorted(declared_home.items()))
             + "). The observer reads a ledger the broker never writes to, and neither "
               "side reports an error.",
@@ -1399,7 +1426,7 @@ def cmd_doctor(args):
             needs_cmd = True
         elif persona and not entry.get("displayName"):
             add("info", "no-display-name",
-                f"{name!r} has no displayName; interagent-queue falls back to its built-in map "
+                f"{name!r} has no displayName; miab-observer falls back to its built-in map "
                 f"instead of the registry.", agent=name,
                 fix=f"Re-register with --display-name {persona!r}.")
 
