@@ -68,19 +68,6 @@ def test_agent_to_agent_disabled_is_blocking(run_cb, config):
     assert out["openclaw_json_fragment"]["tools"]["agentToAgent"] == {"enabled": True}
 
 
-def test_agent_skills_not_allowed_is_only_a_warning(run_cb, config):
-    """We have never verified that `agent-skills` is required — it was observed in one
-    working config and nothing more. An unverified claim must not block anyone's setup."""
-    patch(config, lambda d: d["plugins"]["allow"].remove("agent-skills"))
-    res = doctor(run_cb, config, "--all")
-    out = parse_json(res.stdout)
-    assert "agent-skills-not-allowed" in codes(res)
-    lvl = [f["level"] for f in out["findings"] if f["code"] == "agent-skills-not-allowed"]
-    assert lvl == ["warning"], lvl
-    # and it must not appear in a fragment telling the user to change their config
-    assert "plugins" not in out.get("openclaw_json_fragment", {})
-
-
 def test_broker_skill_switched_off_is_blocking(run_cb, config):
     patch(config, lambda d: d["skills"]["entries"].__setitem__("miab-broker", {"enabled": False}))
     res = doctor(run_cb, config, "--all")
@@ -346,3 +333,92 @@ def test_duplicate_observer_entries_prefer_the_new_name(run_cb, config):
     assert "duplicate-observer-entry" in cs
     assert "legacy-observer-entry" not in cs
     assert "env-missing" not in cs           # satisfied via the preferred entry
+
+
+# ------------------------------------------- the fragment must not choose for you
+# Added 2026-09-01 after the first `doctor --json` run against the live config. The
+# fixture carries ONE binding for `main`; the live config carries eight. That gap is
+# why the auto-fill below shipped untested: with a single candidate the old
+# `sess_cands["main"][0]` was always right, and with several it silently picked the
+# first in bindings[] order. Two runs a day apart suggested two different channels.
+
+def test_closed_target_is_filled_when_there_is_exactly_one_candidate(run_cb, config):
+    """One binding is unambiguous, so filling it in is a real convenience — keep it."""
+    mains = [b for b in json.loads(config.read_text())["bindings"]
+             if b.get("agentId") == "main"]
+    assert len(mains) == 1, "this test is about the single-candidate case"
+    peer = mains[0]["match"]["peer"]["id"]
+    out = parse_json(doctor(run_cb, config, "--all").stdout)
+    frag = out["openclaw_json_fragment"]["skills"]["entries"]["miab-observer"]["env"]
+    assert frag["CLAW_CLOSED_TARGET"] == f"agent:main:discord:channel:{peer}"
+    msg = [f["message"] for f in out["findings"] if f["code"] == "env-missing"][0]
+    assert "The only binding" in msg
+
+
+def test_closed_target_is_not_auto_filled_when_ambiguous(run_cb, config):
+    """Several `main` bindings -> the fragment says REPLACE_ME and names them all.
+
+    The hazard 2.0.0 closed was misdirected delivery to a chat channel, remediated by
+    making CLAW_CLOSED_TARGET required and failing closed. A fragment that pre-fills an
+    arbitrary one of several channels while calling itself merge-ready re-creates that
+    hazard for whoever pastes it. One candidate is a suggestion; several is a choice
+    only the operator can make.
+    """
+    def add_two_more_main_bindings(d):
+        proto = next(b for b in d["bindings"] if b.get("agentId") == "main")
+        for peer in ("100000000000000009", "100000000000000010"):
+            clone = json.loads(json.dumps(proto))
+            clone["match"]["peer"]["id"] = peer
+            d["bindings"].append(clone)
+    patch(config, add_two_more_main_bindings)
+
+    out = parse_json(doctor(run_cb, config, "--all").stdout)
+    frag = out["openclaw_json_fragment"]["skills"]["entries"]["miab-observer"]["env"]
+    assert frag["CLAW_CLOSED_TARGET"] == "REPLACE_ME", frag
+    msg = [f["message"] for f in out["findings"] if f["code"] == "env-missing"][0]
+    assert "3 bindings exist for 'main'" in msg, msg
+    # naming every candidate is the point: the operator cannot choose from a count
+    for peer in ("100000000000000009", "100000000000000010"):
+        assert peer in msg, msg
+
+
+# ------------------------------- checks that fired on the live config untested (R1)
+def test_unknown_agent_in_broker_state_is_a_warning(run_cb, config):
+    """A `--to` that is neither an agents.list id nor any persona name.
+
+    Live shape: a `self-maintenance` caller in the ledger with no matching agent.
+    Warning, not routing: doctor cannot tell a retired agent from a typo, and the
+    evidence rule says an unverifiable claim does not get to fail anyone's build.
+    """
+    with_env(config)
+    res = run_cb("create", "--task", "housekeeping", "--from", "main",
+                 "--to", "self-maintenance", "--summary", "s")
+    assert res.returncode == 0, res.stderr
+
+    out = parse_json(doctor(run_cb, config).stdout)
+    codes_seen = {f["code"] for f in out["findings"]}
+    assert "unknown-agent" in codes_seen
+    f = next(x for x in out["findings"] if x["code"] == "unknown-agent")
+    assert f["level"] == "warning", f
+    assert f["agent"] == "self-maintenance"
+    # distinct from the orphan case: nothing was ever registered under that name
+    assert "orphan-registry-entry" not in codes_seen
+
+
+def test_session_key_matching_no_binding_is_flagged(run_cb, config):
+    """A registered sessionKey the config does not imply -> wakes may reach nobody.
+
+    Warning, not blocking, deliberately: doctor can see that a key matches no
+    bindings[] entry, but not whether the session behind it still exists. Same
+    consequence as `agent-to-agent-disabled`, weaker evidence, lower grade.
+    """
+    with_env(config)
+    run_cb("register", "--agent", "main", "--agent-id", "agent:main",
+           "--session-key", "agent:main:discord:channel:999999999999999999")
+
+    out = parse_json(doctor(run_cb, config, "--agents", "main").stdout)
+    f = next(x for x in out["findings"] if x["code"] == "session-key-unverified")
+    assert f["level"] == "warning", f
+    assert f["agent"] == "main"
+    # the fix has to name the sessions the config actually implies, not just complain
+    assert "agent:main:discord:channel:100000000000000001" in f["fix"], f["fix"]

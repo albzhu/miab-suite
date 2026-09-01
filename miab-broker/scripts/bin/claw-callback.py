@@ -1201,27 +1201,11 @@ def cmd_doctor(args):
             fix="Declare at least an origin agent and one delegate in agents.list.")
 
     # --- skill loading -----------------------------------------------------------
-    plugins = cfg.get("plugins") or {}
-    # NOTE ON EVIDENCE. `agent-skills` is present in the one reference deployment we
-    # have seen, and skills load there. We have NOT established that it is required --
-    # `commands.nativeSkills` and `plugins.bundledDiscovery` are also in the loading
-    # path and may cover it, and the plugin id may differ across openclaw versions.
-    # So this is a warning that names its own uncertainty, not a blocking assertion.
-    # The definitive check is `openclaw skills list --verbose`; if that shows
-    # miab-broker enabled, this finding is noise and can be ignored.
-    if "agent-skills" not in (plugins.get("allow") or []):
-        add("warning", "agent-skills-not-allowed",
-            "plugins.allow does not include 'agent-skills'. In the reference deployment "
-            "that plugin is present and skills load; whether it is strictly required in "
-            "your openclaw version is unverified.",
-            fix="Confirm with `openclaw skills list --verbose` that miab-broker is enabled. "
-                "If it is, ignore this. If it is not, adding 'agent-skills' to plugins.allow "
-                "is the first thing to try.")
-    if ((plugins.get("entries") or {}).get("agent-skills") or {}).get("enabled") is False:
-        add("warning", "agent-skills-disabled",
-            "plugins.entries['agent-skills'].enabled is false, and 'agent-skills' is what "
-            "the reference deployment loads skills through.",
-            fix="Set it to true if `openclaw skills list --verbose` does not show miab-broker.")
+    plugins = cfg.get("plugins") or {}   # still read below for plugins.load.paths
+    # No `agent-skills` check. It was in plugins.allow in the one deployment we had
+    # seen, so an early draft warned about its absence; the author confirmed it is
+    # unrelated to this skill (it is there for a planner's spec-driven development).
+    # Correlation in a single config, not a requirement. Don't re-add it.
 
     skills = cfg.get("skills") or {}
     sk_entries = skills.get("entries") or {}
@@ -1289,9 +1273,22 @@ def cmd_doctor(args):
                 continue
             in_shell = bool(os.environ.get(var))
             if need == "required":
+                # Never auto-fill a delivery destination we cannot single out. The
+                # hazard 2.0.0 closed was misdirected delivery to a channel; a fragment
+                # that pre-fills an arbitrary one of several bindings and presents
+                # itself as merge-ready re-creates it for whoever pastes it. One
+                # candidate is a suggestion; several is a choice only the operator
+                # can make.
+                cands = sess_cands.get("main") or []
                 suggestion = ""
-                if var == "CLAW_CLOSED_TARGET" and sess_cands.get("main"):
-                    suggestion = f" A binding for 'main' implies {sess_cands['main'][0]!r}."
+                if var == "CLAW_CLOSED_TARGET" and cands:
+                    if len(cands) == 1:
+                        suggestion = f" The only binding for 'main' implies {cands[0]!r}."
+                    else:
+                        suggestion = (f" {len(cands)} bindings exist for 'main' — pick the one you "
+                                      f"want summaries delivered to; the fragment below leaves this "
+                                      f"as REPLACE_ME on purpose. Candidates: "
+                                      + ", ".join(repr(c) for c in cands) + ".")
                 add("blocking" if not in_shell else "warning",
                     "env-missing" if not in_shell else "env-shell-only",
                     (f"{var} is not declared in skills.entries['{sk_name}'].env"
@@ -1301,8 +1298,9 @@ def cmd_doctor(args):
                     fix=f"Declare it in skills.entries['{sk_name}'].env (fragment below).")
                 template.setdefault("skills", {}).setdefault("entries", {}) \
                         .setdefault(sk_name, {}).setdefault("env", {})[var] = (
-                    os.environ.get(var) or (sess_cands.get("main", [""])[0]
-                                            if var == "CLAW_CLOSED_TARGET" else "REPLACE_ME"))
+                    os.environ.get(var) or (cands[0]
+                                            if var == "CLAW_CLOSED_TARGET" and len(cands) == 1
+                                            else "REPLACE_ME"))
             elif in_shell:
                 add("info", "env-shell-only",
                     f"{var} is set in this shell but not in skills.entries['{sk_name}'].env. "

@@ -9,7 +9,6 @@
       "skills.load.extraDirs must contain the directory holding the skill folders",
       "skills.entries['miab-observer'].env.CLAW_CLOSED_TARGET -- the notifier exits 1 without it"
     ],
-    "about_the_plugins_block": "Copied from a working deployment, NOT verified as required. Skills may load in your openclaw version via commands.nativeSkills or plugins.bundledDiscovery instead. The authoritative check is `openclaw skills list --verbose` -- if miab-broker shows as enabled, you do not need this block.",
     "optional": "Every other env var below has a working default. Set one only to move a specific file; setting them piecemeal is how the reader and writer end up on different ledgers."
   },
 
@@ -35,11 +34,6 @@
   "tools": {
     "agentToAgent": { "enabled": true },
     "sessions": { "visibility": "all" }
-  },
-
-  "plugins": {
-    "allow": ["agent-skills"],
-    "entries": { "agent-skills": { "enabled": true } }
   },
 
   "skills": {

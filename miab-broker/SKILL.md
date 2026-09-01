@@ -469,13 +469,6 @@ covers every way an agent can be started.
   looks exactly like success**: every command writes its state correctly and no wake is
   ever delivered, so bottles accumulate as `pending` until the reaper fails them.
 - `skills.load.extraDirs` contains the directory holding the skill folders.
-- `plugins.allow` contains `agent-skills` — **unverified**. That plugin is present in the
-  one deployment we have observed, and skills load there, but we have not established
-  that it is required: `commands.nativeSkills` and `plugins.bundledDiscovery` are also in
-  the loading path, and the plugin id may differ across openclaw versions. `doctor` raises
-  it as a warning that says so. The authoritative check is `openclaw skills list
-  --verbose` — if that shows `miab-broker` enabled, your loading path works and the
-  warning is noise.
 - `agents.list[]` declares each agent's `id` (what the broker routes on) and `name`
   (the persona it answers to). Declaring both is necessary but **not sufficient** —
   you must also register the persona as an alias, or a return from `SPECTRE` misses a

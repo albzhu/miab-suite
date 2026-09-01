@@ -29,14 +29,11 @@ All notable changes to the `miab-broker` skill are recorded here.
     emitted command and re-runs `doctor` to confirm it comes back clean.
   - `--json` for a calling agent, `--commands-only` for a shell.
 
-- **Deliberately *not* asserted: `agent-skills` as a hard requirement.** It appears in
-  `plugins.allow` in the one deployment we have observed and skills load there, but that
-  is a single observation, not a verified requirement — `commands.nativeSkills` and
-  `plugins.bundledDiscovery` are also in the loading path. `doctor` raises it as a warning
-  that names its own uncertainty and points at `openclaw skills list --verbose`, which is
-  the check that actually settles it. It is in `openclaw.template.json` labelled the same
-  way. A blocking finding that turns out to be wrong tells people their working install is
-  broken, which is worse than not checking.
+- **No `agent-skills` check.** An early draft warned when `plugins.allow` omitted it,
+  on the strength of its presence in the one deployment we had seen. The author confirmed
+  it is unrelated to this skill — it is allowed there for a planner's spec-driven
+  development — so the warning was a correlation in a single config, and it is gone rather
+  than promoted. `openclaw.template.json` no longer carries a `plugins` block either.
 
 - **`blocking` detection for `tools.agentToAgent.enabled` being false.** This was previously
   invisible and looks like success: every command writes its state correctly and no wake is
@@ -77,6 +74,14 @@ All notable changes to the `miab-broker` skill are recorded here.
   R2 reader merge so the merged renderer canonicalises the right definition; `stats`
   (T20) becomes buildable on an honest number.
 
+- **The `CLAW_CLOSED_TARGET` suggestion never chooses a delivery channel for you.**
+  When `bindings[]` implies exactly one session for `main`, the emitted fragment fills it
+  in — that is unambiguous and saves a lookup. When it implies several, the fragment says
+  `REPLACE_ME` and the finding names the count and every candidate. Auto-picking the first
+  binding in file order would re-create the exact hazard 2.0.0 closed: a summary delivered
+  to a channel nobody chose, this time via a fragment labelled merge-ready. One candidate is
+  a suggestion; several is a decision only the operator can make.
+
 ### Changed
 
 - **Permissions widened, and declared.** `file_read` now includes `$CLAW_HOME/openclaw.json`,
@@ -86,9 +91,18 @@ All notable changes to the `miab-broker` skill are recorded here.
 
 ### Tests
 
-- `tests/test_t24_hops.py` (3 cases), `tests/test_t25_doctor.py` (21 cases) and `tests/fixtures/openclaw.template.json`, the
+- `tests/test_t24_hops.py` (3 cases), `tests/test_t25_doctor.py` (24 cases) and `tests/fixtures/openclaw.template.json`, the
   reference config trimmed to the keys `doctor` reads (binding peer ids are synthetic —
-  live channel ids never enter committed text). Suite: 146 passed, 1 xfailed.
+  live channel ids never enter committed text). Suite: 149 passed, 1 xfailed.
+
+- Four cases added after the first `doctor --json` run against a live install, covering
+  ground the fixture could not reach. The fixture declares one binding for `main`; the
+  live config declared eight, so the single-candidate auto-fill was always correct in
+  tests and arbitrary in practice. Both the one-candidate and many-candidate paths are
+  now asserted. `unknown-agent` and `session-key-unverified` — the other two checks that
+  fired live — had no coverage at all and now do, including their grades: both stay
+  `warning`, because doctor can see that a sessionKey matches no binding but not whether
+  the session behind it still exists.
 
 ## 2.0.0 — first ClawHub publish (2026-08-27; program unchanged since the 2026-08-19 tag)
 
