@@ -91,7 +91,7 @@ def who(name):
     return AGENT_MAP.get(name, name or "Unknown")
 
 # Model running behind each agent — primary + fallback chain (mirrors
-# agents.list[].model in openclaw.json). Keys are the bare agent ids used in
+# agents.entries[<id>].model in openclaw.json). Keys are the bare agent ids used in
 # ledger 'by'/'to'/'wake' fields.
 MODEL_MAP = {
     "main": {"primary": "deepseek-v4-flash", "fallbacks": ["gemini-3-flash-preview", "deepseek-v4-pro", "claude-sonnet-5", "gemini-3.6-flash", "gpt-5.6-terra"]},

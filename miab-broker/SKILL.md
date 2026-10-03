@@ -9,7 +9,7 @@ permissions:
   env: [CLAW_HOME, CALLBACK_TTL_MIN, OPENCLAW_CONFIG, OPENCLAW_WORKSPACE_ROOT, CLAW_CLOSED_TARGET]
   file_read:
     - "$CLAW_HOME/state/callbacks/**"
-    # Read-only, and only by `doctor`. openclaw.json is where agents.list declares the
+    # Read-only, and only by `doctor`. openclaw.json is where agents.entries declares the
     # functional ids this skill routes on and the persona names agents answer to; the
     # gap between the two is the failure `doctor` exists to catch. Never written.
     - "$CLAW_HOME/openclaw.json"
@@ -249,7 +249,8 @@ python3 <miab-broker>/scripts/bin/claw-callback.py doctor --commands-only  # jus
 |---|---|
 | `--config <path>` | config location (default `$CLAW_HOME/openclaw.json`, or `$OPENCLAW_CONFIG`) |
 | `--agents a,b,c` | check exactly these agents instead of inferring the set |
-| `--all` | check every agent in `agents.list`, not only the ones in use |
+| `--all` | check every agent in `agents.entries`, not only the ones in use |
+| `--ignore a,b` | leave these names out of the `unknown-agent` check — for a retired agent still in the ledger. The broker's own actors (`sweep`, `system`) are never reported |
 | `--json` | structured findings, for a calling agent to act on |
 | `--commands-only` | print only the `register` lines, one per line, ready to run |
 
@@ -261,7 +262,7 @@ is invisible to a cron-fired wake.
 
 **Scope: only the agents that need to be routable.** By default `doctor` derives its set from
 evidence the broker already owns — names in the ledger, holders of live bottles, and existing
-registry entries. An agent declared in `agents.list` that you have never delegated to is
+registry entries. An agent declared in `agents.entries` that you have never delegated to is
 reported as `info: not-used` and gets no proposal. `--agents` states the set explicitly;
 `--all` widens it to the whole roster. On a cold start with no ledger, `doctor` says so and
 falls back to the agents `bindings[]` shows can receive traffic.
@@ -303,7 +304,7 @@ All broker state lives under `$CLAW_HOME/state/callbacks/` — `CLAW_HOME` defau
 | `archive/` (other files) | — | **not written by this skill.** Anything here that isn't `cb-*.json` was put there by something else; the broker neither reads nor removes it |
 | `$CLAW_HOME/logs/callback-reaper.log` | `reap-callbacks.sh` | reaper run log |
 | `<miab-broker>/openclaw.template.json` | — | reference config shape, shipped with the skill. Read by you, not by the CLI (§7) |
-| `$CLAW_HOME/openclaw.json` | **read-only, `doctor` only** | gateway config: `agents.list` ids and persona names, `tools.agentToAgent`, skill loading. Never written |
+| `$CLAW_HOME/openclaw.json` | **read-only, `doctor` only** | gateway config: `agents.entries` ids and persona names, `tools.agentToAgent`, skill loading. Never written |
 
 Envelopes are **deleted on completion** (`resolve`/reaped) — only the one-line ledger summary persists.
 
@@ -469,7 +470,8 @@ covers every way an agent can be started.
   looks exactly like success**: every command writes its state correctly and no wake is
   ever delivered, so bottles accumulate as `pending` until the reaper fails them.
 - `skills.load.extraDirs` contains the directory holding the skill folders.
-- `agents.list[]` declares each agent's `id` (what the broker routes on) and `name`
+- `agents.entries` (OpenClaw ≥ 2026.9.3; legacy `agents.list[]` is still read) declares
+  each agent's id — the entry key (what the broker routes on) — and `name`
   (the persona it answers to). Declaring both is necessary but **not sufficient** —
   you must also register the persona as an alias, or a return from `SPECTRE` misses a
   registry keyed on `planner`. `doctor --commands-only` prints those calls.

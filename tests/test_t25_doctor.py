@@ -6,8 +6,8 @@ recorded wakes addressed to `SPECTRE` (×5) and `ECHO` (×1) against a registry 
 on `planner` and `reviewer`, plus `spectre` registered with `agentId: "planner"` —
 a logical name in the routing slot. 16% of delegations died silently as a result.
 Every one of those is derivable from openclaw.json before a bottle is ever created:
-`agents.list[].name` is the persona, `agents.list[].id` is what the registry is keyed
-on, and the gap between them is the bug.
+`agents.entries[<id>].name` is the persona, the `agents.entries` key is what the registry
+is keyed on, and the gap between them is the bug.
 
 The fixture is Albert's real config trimmed to the keys doctor reads.
 """
@@ -305,7 +305,10 @@ def test_shipped_template_is_valid_json_and_self_documenting(run_cb):
     assert "DELETE_THIS_KEY_BEFORE_USE" in d["_miab_broker_template"]
     assert d["tools"]["agentToAgent"]["enabled"] is True
     # every agent carries both the routing id and the persona the registry needs aliased
-    assert all("id" in a and "name" in a for a in d["agents"]["list"])
+    # keyed roster (OpenClaw >= 2026.9.3): the key is the routing id, `name` the persona
+    assert "list" not in d["agents"]
+    assert d["agents"]["entries"] and all("name" in a and "id" not in a
+                                          for a in d["agents"]["entries"].values())
 
 
 # ------------------------------------------------------- legacy entry key (2.0.0 rename)
@@ -384,7 +387,7 @@ def test_closed_target_is_not_auto_filled_when_ambiguous(run_cb, config):
 
 # ------------------------------- checks that fired on the live config untested (R1)
 def test_unknown_agent_in_broker_state_is_a_warning(run_cb, config):
-    """A `--to` that is neither an agents.list id nor any persona name.
+    """A `--to` that is neither an agents.entries id nor any persona name.
 
     Live shape: a `self-maintenance` caller in the ledger with no matching agent.
     Warning, not routing: doctor cannot tell a retired agent from a typo, and the
@@ -422,3 +425,112 @@ def test_session_key_matching_no_binding_is_flagged(run_cb, config):
     assert f["agent"] == "main"
     # the fix has to name the sessions the config actually implies, not just complain
     assert "agent:main:discord:channel:100000000000000001" in f["fix"], f["fix"]
+
+
+# ------------------------------------------- roster shape (OpenClaw 2026.9.3 migration)
+# 2026.9.3 moved the roster from agents.list (array of {id, name}) to agents.entries
+# (dict keyed on id; values carry `name` and no `id`). The fixture is the keyed shape.
+def _to_legacy_list(d):
+    entries = d["agents"].pop("entries")
+    d["agents"]["list"] = [{"id": k, **v} for k, v in entries.items()]
+
+
+def test_keyed_roster_is_not_reported_empty(run_cb, config):
+    """The regression itself: reading agents.list on a 9.3 config found nobody."""
+    d = json.loads(config.read_text())
+    assert "entries" in d["agents"] and "list" not in d["agents"]
+    res = doctor(run_cb, with_env(config), "--all")
+    assert "no-agents" not in codes(res)
+    assert "legacy-agents-list" not in codes(res)
+    # the key is the functional id, and the persona folds onto it as an alias
+    cmds = parse_json(res.stdout)["commands"]
+    assert any("register --agent planner " in c and "agent:planner" in c and "SPECTRE" in c
+               for c in cmds), cmds
+
+
+def test_keyed_roster_ignores_a_stray_id_field(run_cb, config):
+    """The entry KEY is the id; a leftover `id` inside the value must not re-key it."""
+    patch(config, lambda d: d["agents"]["entries"]["planner"].__setitem__("id", "somebody-else"))
+    res = run_cb("doctor", "--config", str(with_env(config)), "--agents", "planner",
+                 "--commands-only")
+    assert "register --agent planner " in res.stdout and "agent:planner" in res.stdout
+    assert "somebody-else" not in res.stdout
+
+
+def test_legacy_list_roster_still_reconciles_and_warns(run_cb, config):
+    patch(with_env(config), _to_legacy_list)
+    keyed = run_cb("doctor", "--config", str(config), "--all", "--commands-only")
+    out = parse_json(doctor(run_cb, config, "--all").stdout)
+    found = {f["code"]: f for f in out["findings"]}
+    assert "no-agents" not in found
+    assert found["legacy-agents-list"]["level"] == "warning"   # advisory: never fails the run
+    assert "register --agent planner " in keyed.stdout
+
+
+def test_both_shapes_emit_identical_register_commands(run_cb, config, tmp_path):
+    with_env(config)
+    legacy = tmp_path / "legacy.json"
+    shutil.copy(config, legacy)
+    patch(legacy, _to_legacy_list)
+    a = run_cb("doctor", "--config", str(config), "--all", "--commands-only").stdout
+    b = run_cb("doctor", "--config", str(legacy), "--all", "--commands-only").stdout
+    assert a.strip() and a == b
+
+
+def test_entries_wins_when_both_shapes_are_present(run_cb, config):
+    patch(with_env(config), lambda d: d["agents"].__setitem__(
+        "list", [{"id": "ghost", "name": "GHOST"}]))
+    res = doctor(run_cb, config, "--all")
+    assert "legacy-agents-list" not in codes(res)
+    assert not any("ghost" in c for c in parse_json(res.stdout)["commands"])
+
+
+def test_empty_roster_is_blocking_in_either_shape(run_cb, config):
+    for mutate in (lambda d: d["agents"].__setitem__("entries", {}),
+                   lambda d: d.__setitem__("agents", {"list": []}),
+                   lambda d: d.pop("agents")):
+        patch(config, mutate)
+        res = doctor(run_cb, config)
+        assert "no-agents" in codes(res)
+        assert res.returncode == 1
+
+
+# ------------------------------------------------- unknown-agent: actors and --ignore
+def _ledger_with(claw_home, *records):
+    cb = claw_home / "state" / "callbacks"
+    cb.mkdir(parents=True, exist_ok=True)
+    (cb / "ledger.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+
+
+def _unknown(res):
+    return {f["agent"] for f in parse_json(res.stdout)["findings"] if f["code"] == "unknown-agent"}
+
+
+def test_broker_internal_actors_are_not_unknown_agents(run_cb, claw_home, config):
+    """Live shape: `by: sweep` on a reaped bottle was reported as an unknown agent."""
+    _ledger_with(claw_home,
+                 {"id": "cb-1", "event": "fail", "by": "sweep"},
+                 {"id": "cb-2", "event": "corrupt", "by": "system"},
+                 {"id": "cb-3", "event": "create", "by": "main", "to": "nobody-at-all"})
+    assert _unknown(doctor(run_cb, with_env(config))) == {"nobody-at-all"}
+
+
+def test_ignore_drops_named_unknown_agents_only(run_cb, claw_home, config):
+    _ledger_with(claw_home,
+                 {"id": "cb-1", "event": "create", "by": "main", "to": "self-maintenance"},
+                 {"id": "cb-2", "event": "create", "by": "main", "to": "typo-agent"})
+    with_env(config)
+    assert _unknown(doctor(run_cb, config)) == {"self-maintenance", "typo-agent"}
+    assert _unknown(doctor(run_cb, config, "--ignore", "Self-Maintenance")) == {"typo-agent"}
+
+
+def test_ignore_never_hides_a_registered_name(run_cb, claw_home, config):
+    """Something registered can be woken, so an orphan stays visible whatever is ignored."""
+    with_env(config)
+    r = run_cb("register", "--agent", "sweep", "--agent-id", "agent:sweep")
+    assert r.returncode == 0, r.stderr
+    res = doctor(run_cb, config, "--ignore", "sweep")
+    orphans = {f["agent"] for f in parse_json(res.stdout)["findings"]
+               if f["code"] == "orphan-registry-entry"}
+    assert "sweep" in orphans
+

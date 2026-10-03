@@ -1,17 +1,17 @@
 {
-  "_comment": "Trimmed from a production openclaw.json (2026-08-27); binding peer ids replaced with synthetic values. Only the keys `doctor` reads are kept: agents.list ids+names, tools.agentToAgent, plugins allow/entries, skills entries+load, bindings. Model/auth/channel blocks are dropped -- doctor never reads them, and they carry env: secret references.",
+  "_comment": "Trimmed from a production openclaw.json (2026-08-27); binding peer ids replaced with synthetic values. Only the keys `doctor` reads are kept: agents.entries keys (ids)+names, tools.agentToAgent, plugins allow/entries, skills entries+load, bindings. Model/auth/channel blocks are dropped -- doctor never reads them, and they carry env: secret references.",
   "agents": {
-    "list": [
-      { "id": "main",     "name": "LYRA",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace" },
-      { "id": "planner",  "name": "SPECTRE", "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-spectre" },
-      { "id": "coder",    "name": "Cinder",  "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-cinder" },
-      { "id": "reviewer", "name": "ECHO",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-echo" },
-      { "id": "debug",    "name": "Zero",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-zero" },
-      { "id": "utility",  "name": "Swift",   "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-swift" },
-      { "id": "sigma",    "name": "sigma",   "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-sigma" },
-      { "id": "free",     "name": "void",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-void" },
-      { "id": "local",    "name": "loco",    "workspace": "~/.openclaw/workspace-loco" }
-    ]
+    "entries": {
+      "main":     { "name": "LYRA",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace" },
+      "planner":  { "name": "SPECTRE", "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-spectre" },
+      "coder":    { "name": "Cinder",  "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-cinder" },
+      "reviewer": { "name": "ECHO",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-echo" },
+      "debug":    { "name": "Zero",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-zero" },
+      "utility":  { "name": "Swift",   "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-swift" },
+      "sigma":    { "name": "sigma",   "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-sigma" },
+      "free":     { "name": "void",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-void" },
+      "local":    { "name": "loco",    "workspace": "~/.openclaw/workspace-loco" }
+    }
   },
   "bindings": [
     { "agentId": "main",    "match": { "channel": "discord", "peer": { "id": "100000000000000001", "kind": "group" } } },

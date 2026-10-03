@@ -1039,12 +1039,43 @@ def load_openclaw_config(override: Optional[str] = None):
     return cfg, p, None
 
 
+def roster_shape(cfg: dict) -> str:
+    """Which roster shape the config carries: "entries", "list" or "none".
+
+    OpenClaw 2026.9.3 moved the roster from `agents.list` (an array of
+    `{id, name, ...}`) to `agents.entries` (a dict keyed on the agent id, whose
+    values carry `name` but no `id`). A non-empty `entries` wins; `list` is read
+    only when `entries` is absent or empty, so a pre-9.3 config still reconciles.
+    """
+    agents = cfg.get("agents")
+    if not isinstance(agents, dict):
+        return "none"
+    if isinstance(agents.get("entries"), dict) and agents["entries"]:
+        return "entries"
+    if isinstance(agents.get("list"), list) and agents["list"]:
+        return "list"
+    return "none"
+
+
 def config_agents(cfg: dict) -> dict:
-    """canonical id -> the raw agents.list[] entry."""
+    """canonical id -> roster entry, normalised to always carry `id`.
+
+    Source is `agents.entries` (keyed dict, OpenClaw >= 2026.9.3) with a fallback
+    to the legacy `agents.list[]`. For the keyed shape the KEY is the functional
+    id — it is what bindings[].agentId and the registry refer to — so it is
+    injected as `id` on a copy and the rest of doctor never sees the difference.
+    """
     out = {}
-    for a in ((cfg.get("agents") or {}).get("list") or []):
-        if isinstance(a, dict) and a.get("id"):
-            out[canon(a["id"])] = a
+    shape = roster_shape(cfg)
+    agents = cfg.get("agents") or {}
+    if shape == "entries":
+        for key, a in agents["entries"].items():
+            if isinstance(key, str) and canon(key) and isinstance(a, dict):
+                out[canon(key)] = {**a, "id": key}
+    elif shape == "list":
+        for a in agents["list"]:
+            if isinstance(a, dict) and a.get("id"):
+                out[canon(a["id"])] = a
     return out
 
 
@@ -1152,6 +1183,12 @@ LEVELS = ("blocking", "routing", "warning", "info")
 LEVEL_ICON = {"blocking": "✗", "routing": "✗", "warning": "!", "info": "·"}
 
 
+# Names the broker itself writes into the ledger's `by` field. They are actors, not
+# agents: `sweep` is the reaper (cmd_sweep), `system` records a corrupt envelope. No
+# gateway agent exists for either, so doctor must not report them as unknown agents.
+INTERNAL_ACTORS = frozenset({"sweep", "system"})
+
+
 def cfg_entry_name(e: dict) -> str:
     return e.get("name") or e.get("id") or "?"
 
@@ -1197,8 +1234,16 @@ def cmd_doctor(args):
 
     if not cagents:
         add("blocking", "no-agents",
-            "agents.list is empty or missing — there is nobody to delegate to.",
-            fix="Declare at least an origin agent and one delegate in agents.list.")
+            "agents.entries is empty or missing (and there is no legacy agents.list) — "
+            "there is nobody to delegate to.",
+            fix="Declare at least an origin agent and one delegate in agents.entries.")
+    elif roster_shape(cfg) == "list":
+        add("warning", "legacy-agents-list",
+            "The roster was read from agents.list, the pre-2026.9.3 shape. OpenClaw 2026.9.3 "
+            "moved it to agents.entries (a dict keyed on agent id). If this gateway is on "
+            "2026.9.3 or later it may not be reading this roster at all; doctor cannot see "
+            "the gateway version, so check `meta.lastTouchedVersion` in this file.",
+            fix="On OpenClaw >= 2026.9.3, move each agents.list[] item to agents.entries[<id>].")
 
     # --- skill loading -----------------------------------------------------------
     plugins = cfg.get("plugins") or {}   # still read below for plugins.load.paths
@@ -1323,7 +1368,7 @@ def cmd_doctor(args):
         basis = "--agents"
     elif args.all:
         raw_needed = set(cagents)
-        basis = "--all (every agent in agents.list)"
+        basis = "--all (every agent in agents.entries)"
     else:
         raw_needed = set(ledger_agents()) | live_bottle_agents() | {canon(k) for k in regagents}
         basis = "delegation history (ledger + live bottles + existing registry)"
@@ -1352,17 +1397,23 @@ def cmd_doctor(args):
         else:
             needed.add(owner)
 
+    ignored = {canon(a) for a in (args.ignore or "").split(",") if canon(a)}
     for raw in sorted(unknown):
+        # Only ever suppresses a name that resolved to no agent; a registered name is
+        # still reported, because a wake can actually be routed to it.
+        if raw not in reg_keys and (raw in INTERNAL_ACTORS or raw in ignored):
+            continue
         if raw in reg_keys:
             add("warning", "orphan-registry-entry",
-                f"Registry entry {raw!r} matches no agent id and no persona name in agents.list. "
+                f"Registry entry {raw!r} matches no agent id and no persona name in agents.entries. "
                 f"Wakes routed to it reach an agent the gateway does not know about.", agent=raw,
-                fix="Remove the entry, or restore the agent in agents.list.")
+                fix="Remove the entry, or restore the agent in agents.entries.")
         else:
             add("warning", "unknown-agent",
-                f"{raw!r} appears in broker state but is neither an agents.list id nor any "
+                f"{raw!r} appears in broker state but is neither an agents.entries id nor any "
                 f"agent's persona name \u2014 a retired agent, or a typo in a --to/--from.",
-                agent=raw, fix="Correct the caller, or add the agent to agents.list.")
+                agent=raw, fix="Correct the caller, or add the agent to agents.entries. If the name is "
+                               "known and retired, silence it with --ignore.")
 
     unused = sorted(set(cagents) - needed)
 
@@ -1406,7 +1457,7 @@ def cmd_doctor(args):
 
         if entry is None:
             add("routing", "unregistered",
-                f"{name!r} is declared in agents.list but has no registry entry. `wake` exits "
+                f"{name!r} is declared in agents.entries but has no registry entry. `wake` exits "
                 f"non-zero for it and the bottle stalls with no holder reachable.",
                 agent=name, fix="Register it.")
             commands.append(_register_cmd(name, want_id, aliases=alias_args, display=persona))
@@ -1423,7 +1474,7 @@ def cmd_doctor(args):
                 needs_cmd = True
             else:
                 add("warning", "agent-id-mismatch",
-                    f"{name!r} is registered as {have_id!r} but agents.list declares id "
+                    f"{name!r} is registered as {have_id!r} but agents.entries declares id "
                     f"{cfg_entry['id']!r} (implying {want_id!r}). Deliberate remapping is fine; "
                     f"a stale rename is not.", agent=name)
 
@@ -1457,7 +1508,7 @@ def cmd_doctor(args):
 
     for name in unused:
         add("info", "not-used",
-            f"{name!r} ({cfg_entry_name(cagents[name])}) is declared in agents.list but the broker "
+            f"{name!r} ({cfg_entry_name(cagents[name])}) is declared in agents.entries but the broker "
             f"has never routed to it. No action needed.", agent=name)
 
     _doctor_output(args, str(cpath), findings, commands, template, cold_start, basis)
@@ -1647,7 +1698,9 @@ def main():
     dr.add_argument("--agents", help="comma-separated agents to check, instead of inferring "
                                      "the set from delegation history")
     dr.add_argument("--all", action="store_true",
-                    help="check every agent in agents.list, not only the ones in use")
+                    help="check every agent in agents.entries, not only the ones in use")
+    dr.add_argument("--ignore", help="comma-separated names to leave out of the unknown-agent "
+                                     "check (e.g. a retired agent still in the ledger)")
     dr.add_argument("--json", action="store_true", help="machine-readable findings")
     dr.add_argument("--commands-only", dest="commands_only", action="store_true",
                     help="print only the register commands to run, one per line")

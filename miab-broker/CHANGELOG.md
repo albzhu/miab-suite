@@ -84,6 +84,23 @@ All notable changes to the `miab-broker` skill are recorded here.
 
 ### Changed
 
+- **`doctor` reads the roster from `agents.entries` (OpenClaw 2026.9.3).** 2026.9.3 moved the
+  agent roster from `agents.list` (an array of `{id, name}`) to `agents.entries` (a dict keyed
+  on the agent id, whose values carry `name` and no `id`). `doctor` still read `agents.list`, so
+  on a migrated config it reported a false blocking `no-agents` and could not validate the
+  registry. The entry key is now the functional id; persona folding and the emitted `register`
+  commands are unchanged, and a test asserts both shapes emit byte-identical commands. The
+  legacy array is still read when `agents.entries` is absent or empty, with a new advisory
+  `legacy-agents-list` warning; when both are present `agents.entries` wins. No change to
+  `register` / `wake` / `forward` / `return` / `resolve` or to `agent-registry.json` — none of
+  them ever read `openclaw.json`. `openclaw.template.json` ships the keyed shape.
+
+- **`doctor` no longer reports the broker's own actors as unknown agents.** `sweep` (the reaper)
+  and `system` (corrupt-envelope records) appear in the ledger's `by` field and were flagged
+  `unknown-agent` once a sweep had failed a bottle. They are skipped unless something is actually
+  registered under that name. New `--ignore a,b` drops named entries from the same check, for a
+  retired agent whose name is still in the ledger; it never hides a registered name.
+
 - **Permissions widened, and declared.** `file_read` now includes `$CLAW_HOME/openclaw.json`,
   and `env` adds `OPENCLAW_CONFIG`, `OPENCLAW_WORKSPACE_ROOT` and `CLAW_CLOSED_TARGET` (all
   read, none set). `doctor` **never writes `openclaw.json`** — where a config change is
