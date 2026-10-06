@@ -1,6 +1,6 @@
 # miab-suite — ROADMAP
 
-> Last updated **2026-08-29**. Owns forward planning; supersedes `miab-broker-execution-backlog.md`, `miab-broker-feature-roadmap.md`, and `miab-broker-M3-scope.md` (originals deleted 2026-08-31). T/Q numbering is preserved from the retired backlog. Current state lives in `STATUS.md`; shipped history in `HISTORY.md`.
+> Last updated **2026-09-01**; R1 item 6 added **2026-10-02**. Owns forward planning; supersedes `miab-broker-execution-backlog.md`, `miab-broker-feature-roadmap.md`, and `miab-broker-M3-scope.md` (originals deleted 2026-08-31). T/Q numbering is preserved from the retired backlog. Current state lives in `STATUS.md`; shipped history in `HISTORY.md`.
 
 Ordering principle, unchanged: *exploitable now → silently losing data → producing wrong results → missing guarantees → ergonomics*.
 
@@ -15,16 +15,18 @@ Ordering principle, unchanged: *exploitable now → silently losing data → pro
 
 ---
 
-## R1 — broker 2.1.0: `doctor` + `hops` — **next up, in progress** (target: ~Sep 6)
+## R1 — broker 2.1.0: `doctor` + `hops` — **code-complete, release pending** (original target ~Sep 6, slipped)
 
-Branch `t25-doctor` (`4673bcd`) already carries the feature complete with 141 passing tests.
+Branch `t25-doctor`, rebased onto `main`, five commits. Suite **158 passed / 1 xfailed** (2026-10-02, off-Mac). `VERSION` is stamped `2.1.0` and the CHANGELOG entry is written.
 
-1. **Rebase `t25-doctor` onto `main`** — it branched pre-rename; observer paths in tests/fixtures must move to `miab-observer/`.
-2. **T25 `doctor`** (done on branch): reconciles `openclaw.json` + `agent-registry.json` + the ledger; graded findings (blocking/routing/warning/info); emits a merge-ready config fragment, never writes; `openclaw.template.json` ships beside SKILL.md. Remaining polish: run `doctor --json` against the live `~/.openclaw` (fixtures reproduce known bugs; the live registry may hold others); settle the `agent-skills` warning (see STATUS punchlist); optionally add a test reading the shipped template as the authoritative key list.
-3. **T24 `hops` fix** (~1 h) — fold into this release. Three contradictory definitions exist (`len(env["results"])` in the CLI, `len(bottle_records)` in the retired notifier path, nothing in the envelope). It is LATE against its own constraint: it must land **before** R2's reader rewrite canonicalises a wrong definition, and `stats` (T20) is wrong until it lands. The observer does not read `hops`, so the coupling rule does not bind — fix in place.
-4. Blocked on Albert: `CLAW_CLOSED_TARGET` choice (doctor reports its absence as blocking against the live config — correctly).
+1. ~~Rebase `t25-doctor` onto `main`~~ — **done**. The branch predated the rename, so observer paths and test fixtures moved to `miab-observer/`.
+2. **T25 `doctor`** — **done**. Reconciles `openclaw.json` + `agent-registry.json` + the ledger; findings graded `blocking` / `routing` / `warning` / `info` with non-zero exit on the first two; emits a merge-ready config fragment and the minimum ordered set of `register` calls, and never writes config itself. `openclaw.template.json` ships beside `SKILL.md`, with a tested invariant that the shipped template provokes no blocking finding. Flags: `--config`, `--agents`, `--all`, `--json`, `--commands-only`.
+3. **Rename alignment** — **done**. doctor checks the `miab-observer` entry and the sibling directory; a legacy `interagent-queue` key under `skills.entries` is honoured with a `legacy-observer-entry` warning; emitted fragments always use the new name; both keys present raises `duplicate-observer-entry` and the new name wins.
+4. **T24 `hops`** — **done**, folded into this release rather than deferred, because R2's reader rewrite would otherwise canonicalise a wrong definition and `stats` (T20) stays wrong until it lands. One definition now: **hops are delegation edges**. The envelope carries `hops` (1 on create, +1 on forward), the resolve ledger event reports it, and pre-2.1.0 envelopes derive it from history. It is a new optional envelope key, so the schema-compatibility contract holds; the observer does not read it, so the coupling rule does not bind.
+5. **Test-fixture scrub** — **done**. `tests/fixtures/openclaw.template.json` previously carried real binding peer ids; they are now synthetic. The pre-scrub branch head must never be pushed.
+6. **OpenClaw 2026.9.3 `agents.entries`** — **done 2026-10-02** (`ca59fd3`). 2026.9.3 moved the roster from the `agents.list` array to `agents.entries`, a dict keyed on agent id; `doctor` still read the old key and reported a false blocking `no-agents` on a migrated config. It now reads `agents.entries` with the key as the functional id, and emits the same `register` commands for either shape (tested). The legacy `agents.list` is deliberately still read for installs on older OpenClaw, with an advisory `legacy-agents-list` warning; `agents.entries` wins when both exist. The shipped template and the test fixture use the keyed shape. No other subcommand reads `openclaw.json`, so routing behaviour is untouched.
 
-Release: broker **2.1.0** (additive; VERSION already stamped on the branch). Publish from the post-rebase merge commit.
+Remaining before publish — all of it a Mac shell, tracked in `STATUS.md`'s punchlist: run the suite locally (doctor against the live config is clean), then merge (`--no-ff`), push, and publish **2.1.0** from the merge commit.
 
 ## R2 — observer 2.1.0: the Phase 2 reader rewrite (target: ~Sep 20)
 
@@ -37,7 +39,7 @@ ADR-001 Phase 2, the half not yet done. Merge `notify_closed_bottles.py` into `m
 - **Q7** — broker version floor as a runtime gate, not prose.
 - Retire `notify_closed_dryrun.py` into a `--dry-run` flag (ADR item 10).
 
-Constraint: **T24 must already be merged** (R1) before this rewrite.
+Constraint: T24 had to land first — it is **done on `t25-doctor`**, so this rewrite is unblocked as soon as R1 merges.
 
 ## R3 — broker 2.2.0: M4 "no silent data loss" (target: ~mid-Oct)
 
@@ -66,6 +68,7 @@ Constraint: **T24 must already be merged** (R1) before this rewrite.
 
 ## Not scheduled / standing decisions
 
+- Dropping the legacy `agents.list` reader — **not now** (decided 2026-10-02): 2.0.0 is published and other installs may be on OpenClaw < 2026.9.3. Revisit when that floor is no longer worth supporting.
 - `doctor --fix` — **rejected**; don't add without re-arguing (a wrong automated config write costs more than the manual paste saves).
 - A third delivery sink for the observer — revisit rather than generalise; two sinks, no registry.
 - Layout changes (`skills/<name>/`) — closed by ADR-001 amendment.

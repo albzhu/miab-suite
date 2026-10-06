@@ -1,0 +1,37 @@
+{
+  "_comment": "Trimmed from a production openclaw.json (2026-08-27); binding peer ids replaced with synthetic values. Only the keys `doctor` reads are kept: agents.entries keys (ids)+names, tools.agentToAgent, plugins allow/entries, skills entries+load, bindings. Model/auth/channel blocks are dropped -- doctor never reads them, and they carry env: secret references.",
+  "agents": {
+    "entries": {
+      "main":     { "name": "LYRA",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace" },
+      "planner":  { "name": "SPECTRE", "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-spectre" },
+      "coder":    { "name": "Cinder",  "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-cinder" },
+      "reviewer": { "name": "ECHO",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-echo" },
+      "debug":    { "name": "Zero",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-zero" },
+      "utility":  { "name": "Swift",   "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-swift" },
+      "sigma":    { "name": "sigma",   "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-sigma" },
+      "free":     { "name": "void",    "workspace": "${OPENCLAW_WORKSPACE_ROOT}/workspace-void" },
+      "local":    { "name": "loco",    "workspace": "~/.openclaw/workspace-loco" }
+    }
+  },
+  "bindings": [
+    { "agentId": "main",    "match": { "channel": "discord", "peer": { "id": "100000000000000001", "kind": "group" } } },
+    { "agentId": "free",    "match": { "channel": "discord", "peer": { "id": "100000000000000002", "kind": "group" } } },
+    { "agentId": "utility", "match": { "channel": "discord", "peer": { "id": "100000000000000003", "kind": "group" } } },
+    { "agentId": "sigma",   "match": { "channel": "discord", "peer": { "id": "100000000000000004", "kind": "group" } } },
+    { "agentId": "planner", "match": { "channel": "discord", "peer": { "id": "100000000000000005", "kind": "group" } } }
+  ],
+  "plugins": {
+    "allow": ["acpx", "discord", "openrouter", "google", "anthropic", "litellm", "memory-core", "agent-skills", "deepseek"],
+    "entries": { "agent-skills": { "enabled": true } },
+    "load": { "paths": ["${OPENCLAW_WORKSPACE_ROOT}/workspace/Repos/agent-skills"] }
+  },
+  "skills": {
+    "entries": { "slack": { "enabled": false }, "tmux": { "enabled": false } },
+    "load": { "extraDirs": ["${OPENCLAW_WORKSPACE_ROOT}/skills"] }
+  },
+  "tools": {
+    "agentToAgent": { "enabled": true },
+    "profile": "coding",
+    "sessions": { "visibility": "all" }
+  }
+}
