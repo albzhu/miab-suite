@@ -5,6 +5,6 @@ __pycache__/
 .pytest_cache/
 
 artifacts
-
+security_audits
 
 .DS_Store
