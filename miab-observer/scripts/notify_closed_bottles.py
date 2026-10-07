@@ -401,7 +401,7 @@ def load_all_lines():
         return [l.strip() for l in f if l.strip()]
 
 
-def _parse_records(lines) -> list:
+def parse_records(lines) -> list:
     """Every ledger line as a dict. A line that is not valid JSON, or not a JSON object,
     becomes {} so that list indexes keep lining up with the cursor."""
     out = []
@@ -481,7 +481,7 @@ def format_closed_bottle(cid: str, all_records: list, end_rec: dict) -> str:
 # ----------------------------------------------------------------- collection
 def find_end_record(cid: str) -> dict | None:
     """Locate the ledger's end-state record (resolve/cancel/fail) for one bottle."""
-    for rec in _parse_records(load_all_lines()):
+    for rec in parse_records(load_all_lines()):
         if end_bottle_id(rec) == cid:
             return rec
     return None
@@ -492,7 +492,7 @@ def render_bottle(cid: str) -> tuple[str | None, str]:
     end_rec = find_end_record(cid)
     if end_rec is None:
         return None, f"No end-state (resolve/cancel/fail) event found for bottle {sanitize(cid, limit=NAME_LIMIT)}."
-    all_records = _parse_records(load_all_lines())
+    all_records = parse_records(load_all_lines())
     return format_closed_bottle(cid, all_records, end_rec), f"Rendered bottle {sanitize(cid, limit=NAME_LIMIT)}."
 
 
@@ -540,7 +540,7 @@ def collect_new(state, advance):
     if cursor >= total:
         return [], "No new callback events." + suffix, total
 
-    all_records = _parse_records(lines)
+    all_records = parse_records(lines)
     seen = set(state.get("delivered_ids", []))
     messages = []
     for rec in all_records[cursor:]:
@@ -704,7 +704,7 @@ def main():
             _emit({"messages": [], "status": "No new callback events." + suffix, "delivered": True})
             return
 
-        all_records = _parse_records(lines)
+        all_records = parse_records(lines)
         delivered_msgs = []
         skipped = []
         # Deliver in order; stop advancing the cursor at the first delivery
