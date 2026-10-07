@@ -540,3 +540,27 @@ def test_finalize_can_post_a_bottle_from_a_rotated_archive(notifier):
     assert state["delivered_ids"] == [D, B]
     assert state["last_processed_line"] == state_before["last_processed_line"]
     assert state["ledger_head"] == state_before["ledger_head"]
+
+
+# ------------------------------------------------- read-only commands before a first run
+
+def test_status_and_peek_before_a_first_run_report_it_and_write_nothing(notifier):
+    """`status` and `peek` with no state file say what a real `process` would do, without
+    creating the state file themselves."""
+    notifier.write_ledger(THREE)
+
+    status = notifier.run("status")
+    assert status.returncode == 0, status.stderr
+    out = json.loads(status.stdout)
+    assert out["state_present"] is False
+    assert out["ledger_lines"] == TOTAL and out["last_processed_line"] == TOTAL
+    assert "first run" in out["note"].lower()
+
+    peek = notifier.run("peek")
+    assert peek.returncode == 0, peek.stderr
+    out = json.loads(peek.stdout)
+    assert out["messages"] == [] and out["delivered"] is False
+    assert "first run" in out["status"].lower()
+
+    assert not notifier.state_path.exists()
+    assert notifier.calls() == []
