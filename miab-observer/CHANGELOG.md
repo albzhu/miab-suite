@@ -12,6 +12,100 @@ repository combine (ADR-001 Phase 1, 2026-08-26), whose earliest commit postdate
 The 1.2.0 section below was therefore reconstructed by diffing the published package
 (`interagent-queue-1.2.0.zip`, sha256 `8865544e…9ef0`) against the tree, not from history.
 
+## 2.0.1 — "Notifier hardening"
+
+A patch release, and only the message sink changes: `scripts/notify_closed_bottles.py`, the one
+piece of this skill whose output leaves the machine, and `scripts/notify_closed_dryrun.py`, which
+shares its code. `miab_observer.py` (the log sink) is untouched. Every fix below answers a finding
+that ClawHub's scanners raised against the published 2.0.0 package. Whether the scanners now rate
+2.0.1 differently is something only a re-scan of the published package can show; this entry says what
+the code does now and how it was checked.
+
+### What changes for existing installs
+
+Read this before upgrading a host that runs the notifier from cron.
+
+- **No backfill on first run.** A missing `closed_bottle_state.json` used to mean cursor 0, so the
+  first `process` (and the first `on`, `off` or `finalize`, which created the same cursor-0 state)
+  posted every closed bottle in the ledger. Now a missing state file starts at the **end** of the
+  ledger: `process`, `on`, `off` and `finalize` all record the current ledger length as the cursor,
+  post nothing, and say so in the status output. `finalize <cid>` is still how you post one older
+  bottle on demand.
+- **A corrupt state file, or a truncated ledger, now exits `1`.** Before, an unreadable or invalid
+  state file was silently replaced with cursor 0 and an empty `delivered_ids`, and a cursor beyond the
+  ledger was silently reset to 0; both re-posted every closed bottle in the ledger. Now the notifier
+  exits `1` with `{"ok": false, ...}` on stderr, delivers nothing and leaves the file untouched. **A cron
+  job running it will start reporting that exit code; that is the intent.** SKILL.md §3a lists each
+  case and how to recover. `render` and `notify_closed_dryrun.py` need no state and keep working when
+  the file is damaged.
+- **Your existing state file still loads.** The new `ledger_head` key is optional. The first 2.0.1 run
+  adopts the ledger's fingerprint and continues from your cursor. Two edge cases: a 2.0.0 file whose
+  cursor is beyond the ledger's length exits `1` ("ambiguous": truncation and the broker's rotation
+  look the same without a fingerprint), with a remedy in the error; and a 2.0.0 file whose cursor is
+  still `0` is indistinguishable from a legitimate one, so its first 2.0.1 run still posts the ledger
+  from line 0.
+- **A rotated ledger is followed, not rewound.** The broker rotates by renaming `ledger.jsonl`, which
+  leaves a cursor beyond the new file's length. A different `ledger_head` now means "new ledger": read
+  it from line 0, with `delivered_ids` preventing repeats. The same cursor with the *same* head is
+  truncation, and exits `1`.
+- **Messages look slightly different.** `@` and `<` in ledger text are followed by U+200B, `](` is
+  split, control characters are gone, the bottle id and every reason are now capped and cleaned (the
+  reasons were not before), and a long history ends with `... N more history line(s) omitted`. No
+  message exceeds 1900 characters.
+- **Small command changes.** `peek` now leaves out bottles already in `delivered_ids`, so it shows
+  what `process` would send, and refuses a truncated ledger as `process` does. `status` gains
+  `state_present`, `ledger_lines` and `ledger_head`. `on` checks `CLAW_CLOSED_TARGET` before it writes.
+- **No new environment variables, paths or permissions.** The `permissions` block is unchanged.
+
+### Fixed
+
+- **State and cursor could re-post the whole ledger** — A.I.G `T09` ("Malformed notifier state or
+  ledger truncation can replay previously delivered messages") and the matching ClawScan `T09`.
+  `load_state()` swallowed every exception and returned cursor 0; `process` and `collect_new()` reset a
+  cursor beyond the ledger to 0. Now: a missing state file is the only fresh start (and starts at the
+  ledger end); a present but unusable one — unreadable, not JSON, not an object, `last_processed_line`
+  not a non-negative integer (booleans rejected), `delivered_ids` not a list of strings, `enabled` not a
+  boolean, `ledger_head` not a SHA-256 digest — fails closed in the shape `miab_observer.py` uses; and one
+  function, `reconcile_cursor()`, decides how the cursor relates to the ledger for both `process` and
+  `peek`. Checked by `tests/test_notifier_state_and_cursor.py`, which drives the notifier as a
+  subprocess against a throwaway `CLAW_HOME` and a stand-in `openclaw` that records what it is asked to
+  send (every unusable-state case × `process`, `on` and `finalize`; every row of the cursor table; delivery
+  failure and retry).
+- **Ledger text was posted without neutralising mentions** — A.I.G `T09` ("Untrusted ledger content is
+  delivered to Discord without neutralizing mentions") and the matching ClawScan `T09`. One function now
+  cleans every ledger-derived string (id, task, result, every reason, agent names, unknown event names)
+  and caps it; the whole message is capped. Checked by `tests/test_notifier_chat_text.py` (field ×
+  payload for `@everyone`, `@here`, `<@id>`, `<@!id>`, `<@&id>`, `<#id>` and a masked link, across
+  resolve, cancel and fail, history lines and agent names), asserting on the `--message` argument the
+  stand-in `openclaw` received. **Not checked: how Discord renders the result**, which needs a live send.
+- **Dynamic code execution in the dry-run script** — static analysis `suspicious.dynamic_code_execution`
+  (critical, `notify_closed_dryrun.py` line 23 in 2.0.0). The script loaded the notifier through
+  `importlib` and `exec_module()`; it is now `import notify_closed_bottles`, and
+  `tests/test_notifier_dryrun.py` asserts that neither script contains `exec_module`, `eval(` or `exec(`
+  and that the dry run prints the same text a real delivery sends.
+- **Unredacted ledger text leaves the machine** — ClawScan `SQP-2` (and the SkillSpector finding of the
+  same id). **Documented, not removed**: task, result and reason still post, by decision, with no new
+  environment variable and no metadata-only mode. SKILL.md §3a and `skill-card.md` now state exactly
+  what is posted (bottle id, task, result, reason, agent names, model names, per-hop history), that none
+  of it is redacted, what is neutralised, and what each fail-closed exit means.
+- **Wording:** SKILL.md and the `target_channel()` docstring called a hardcoded channel id "a secret in
+  committed text". It is an identifier, not a credential; the hazard of a default target is misdirected
+  delivery. Corrected in both places.
+
+### Not addressed
+
+- **The log sink's cursor rewind.** `miab_observer.py` still resets a cursor beyond the ledger to 0.
+  Left alone on purpose until R2 merges the two cursors.
+- **Two separate cursors.** `queue_state.json` and `closed_bottle_state.json` remain independent.
+- **No redaction.** Nothing detects or removes secrets in ledger text before it is posted.
+- **The `Hops:` line** counts the bottle's ledger lines, not delegation edges.
+- **File modes.** The state file is still written at the ambient umask (the broker has 0700/0600; the
+  observer does not yet).
+- **A failed send still exits `0` from `process`.** The cursor stays on that bottle and the next run
+  retries it; only `finalize` exits `1`. Documented in SKILL.md §3a.
+- **Neutralisation is text-level and covers mentions and masked links only.** Bare URLs and other
+  markdown still render; length is counted in characters, not UTF-16 units.
+
 ## 2.0.0 — "miab-observer"
 
 ### Changed

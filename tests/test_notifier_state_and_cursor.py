@@ -482,7 +482,11 @@ def test_delivery_failure_stops_the_cursor_and_the_next_run_retries(notifier):
     first time — is not sent again."""
     _seed(notifier, cursor=0)
 
-    notifier.run("process", exit_code=1, fail_only=B)
+    failed = notifier.run("process", exit_code=1, fail_only=B)
+    # SKILL.md section 3a documents this: a failed send parks the cursor and is retried, and
+    # does not turn `process` into an exit-1 (only `finalize` exits 1). Changing it is a
+    # decision to make on purpose, so it is pinned here rather than left to drift.
+    assert failed.returncode == 0, failed.stderr
     attempts = [(c["exit"], [x for x in (A, B, C) if x in notifier.message_of(c)])
                 for c in notifier.calls()]
     assert attempts == [(0, [A]), (1, [B])], "C must not be attempted after B fails"
@@ -512,3 +516,27 @@ def test_delivery_failure_on_the_first_bottle_keeps_the_cursor_in_place(notifier
 
     assert notifier.run("process").returncode == 0
     assert _delivered_ids(notifier) == [B, C]
+
+
+def test_finalize_can_post_a_bottle_from_a_rotated_archive(notifier):
+    """SKILL.md section 3a says bottles that closed in a ledger the broker has since rotated
+    away are not posted by the rotation path, and that pointing CLAW_LEDGER at the archive
+    for one `finalize <cid>` posts one. That has to stay true, and finalize must do it
+    without disturbing the cursor that now belongs to the new ledger."""
+    notifier.write_ledger(THREE)
+    assert notifier.run("process").returncode == 0           # first run: cursor 7, head of THREE
+    archive = notifier.callbacks / "ledger.20260101000000.jsonl"
+    notifier.ledger.rename(archive)                          # what the broker's rotation does
+    notifier.write_ledger(make_bottle(D, "resolve", t0=600))
+
+    assert notifier.run("process").returncode == 0           # follows the new ledger from line 0
+    assert _delivered_ids(notifier) == [D]
+    state_before = notifier.state()
+
+    r = notifier.run("finalize", B, extra_env={"CLAW_LEDGER": str(archive)})
+    assert r.returncode == 0, r.stderr
+    assert _delivered_ids(notifier) == [D, B]
+    state = notifier.state()
+    assert state["delivered_ids"] == [D, B]
+    assert state["last_processed_line"] == state_before["last_processed_line"]
+    assert state["ledger_head"] == state_before["ledger_head"]

@@ -67,9 +67,10 @@ def target_channel_or_none() -> str | None:
     return t or None
 
 def target_channel() -> str:
-    """The delivery target, or fail closed. There is deliberately no default:
-    a hardcoded channel id is both a secret in committed text and a way to
-    mistarget delivery on a host that never configured this notifier."""
+    """The delivery target, or fail closed. There is deliberately no default: a
+    hardcoded channel id is an identifier, not a credential, so the hazard is not
+    secrecy but misdirected delivery -- a baked-in default would aim every host that
+    never configured this notifier at someone else's channel."""
     t = target_channel_or_none()
     if t is None:
         print(json.dumps({"ok": False,
