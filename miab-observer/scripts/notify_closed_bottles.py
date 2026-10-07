@@ -38,6 +38,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -96,7 +97,11 @@ AGENT_MAP = {
 }
 
 def who(name):
-    return AGENT_MAP.get(name, name or "Unknown")
+    """Display name for an agent id from the ledger. Known ids map to AGENT_MAP; anything
+    else is ledger text and is neutralised and capped like any other (an unhashable or
+    non-string value must not crash the sweep either)."""
+    label = AGENT_MAP.get(name) if isinstance(name, str) else None
+    return sanitize(label or name, limit=NAME_LIMIT) or "Unknown"
 
 # Model running behind each agent — primary + fallback chain (mirrors
 # agents.entries[<id>].model in openclaw.json). Keys are the bare agent ids used in
@@ -117,7 +122,7 @@ MODEL_MAP = {
 def who_model(name, short=True):
     """Compact '<model>' tag for an agent id. short=True -> just primary.
     short=False -> 'primary → fb1, fb2' (full chain). Empty if unknown."""
-    info = MODEL_MAP.get(name)
+    info = MODEL_MAP.get(name) if isinstance(name, str) else None
     if not info:
         return ""
     if short:
@@ -304,13 +309,56 @@ def reconcile_cursor(state: dict, lines) -> tuple[int, str, str | None] | None:
 
 
 # ----------------------------------------------------------------- summarization
+# Everything in this section turns LEDGER text into text that is posted to a chat channel.
+# Ledger text is not trusted: any agent, and anything else with write access to the ledger,
+# can author a task, result, reason or agent name, and nothing here redacts it. What these
+# functions do is make it inert as chat markup, and bounded in size.
+TASK_LIMIT = 300
+RESULT_LIMIT = 400
+REASON_LIMIT = 300
+NAME_LIMIT = 64          # agent names, unknown event names and bottle ids
+MESSAGE_LIMIT = 1900     # the whole report; Discord's own cap is 2000
+
+ZWSP = "\u200b"          # zero-width space: what makes a mention or masked link inert
+
+# Dropped outright, in addition to every control character (category Cc): lone surrogates
+# (Cs; JSON allows "\ud800", and one in the argv of `openclaw` makes the send raise, which
+# would read as a delivery failure and park the cursor on that bottle for good), the bidi
+# formatting characters, which can make text read in a different order than it is written,
+# and U+200B itself, so that applying sanitize() twice gives what applying it once does.
+_STRIPPED = frozenset(
+    [ZWSP, "\u200e", "\u200f", "\u061c", "\ufeff"]
+    + [chr(c) for c in range(0x202A, 0x202F)]      # LRE RLE PDF LRO RLO
+    + [chr(c) for c in range(0x2066, 0x206A)])     # LRI RLI FSI PDI
+
+
 def sanitize(text, limit=500):
+    """The one function every ledger-derived string passes through on its way to chat.
+
+    Strips control characters (newlines and tabs become spaces first, so a value cannot
+    forge a line of the report), collapses whitespace, then makes mentions and masked links
+    inert: U+200B goes after every `@` and every `<` -- which defuses @everyone, @here,
+    <@id>, <@!id>, <@&id> and <#id> -- and `](` is split so [text](url) renders as typed.
+    Finally the result is cut to `limit` characters, with "..." marking a cut.
+
+    Text-level only: no flag on the send call can do this, and bare URLs and ordinary
+    markdown still render. Anything that is not already a string is stringified."""
     if not text:
         return ""
-    lines = [l.strip() for l in str(text).split("\n") if l.strip()]
-    cleaned = " ".join(" ".join(lines).split())
+    kept = []
+    for ch in str(text):
+        if ch.isspace():
+            kept.append(" ")
+        elif ch not in _STRIPPED and unicodedata.category(ch) not in ("Cc", "Cs"):
+            kept.append(ch)
+    cleaned = " ".join("".join(kept).split())
+    cleaned = (cleaned.replace("@", "@" + ZWSP)
+                      .replace("<", "<" + ZWSP)
+                      .replace("](", "]" + ZWSP + "("))
     if len(cleaned) > limit:
-        return cleaned[: limit - 3] + "..."
+        # Cutting after the neutralising is safe: whatever the cut leaves (`@`, `<`, `]`)
+        # is followed by "...", which cannot complete a mention or a link.
+        return cleaned[: limit - 3].rstrip() + "..."
     return cleaned
 
 # ----------------------------------------------------------------- history render
@@ -335,12 +383,15 @@ def render_step(rec):
     if event == "resolve":
         return f"✅ resolved by {by}{tag}"
     if event == "cancel":
-        return f"❌ cancelled by {by}{tag}" + (f" ({rec.get('reason')})" if rec.get("reason") else "")
+        reason = sanitize(rec.get("reason"), limit=REASON_LIMIT)
+        return f"❌ cancelled by {by}{tag}" + (f" ({reason})" if reason else "")
     if event == "fail":
-        return f"⚠️ failed/reaped by {by}{tag}" + (f" ({rec.get('reason')})" if rec.get("reason") else "")
+        reason = sanitize(rec.get("reason"), limit=REASON_LIMIT)
+        return f"⚠️ failed/reaped by {by}{tag}" + (f" ({reason})" if reason else "")
     if event == "corrupt":
-        return f"🗑️ quarantined ({rec.get('reason', 'corrupt envelope')})"
-    return f"{event} by {by}{tag}"
+        reason = sanitize(rec.get("reason"), limit=REASON_LIMIT) or "corrupt envelope"
+        return f"🗑️ quarantined ({reason})"
+    return f"{sanitize(event, limit=NAME_LIMIT) or 'unknown event'} by {by}{tag}"
 
 def load_all_lines():
     lf = ledger_file()
@@ -374,29 +425,58 @@ def end_bottle_id(rec: dict) -> str | None:
         return cid
     return None
 
+def _omitted_marker(n: int) -> str:
+    return f"     ... {n} more history line(s) omitted"
+
+
+def _fit_report(head: list, history: list) -> str:
+    """Join the report, at most MESSAGE_LIMIT characters. If the full history does not fit,
+    whole history lines are dropped from the END and an explicit marker says how many, so a
+    long delegation chain is visibly cut rather than silently or mid-line."""
+    full = "\n".join(head + history)
+    if len(full) <= MESSAGE_LIMIT:
+        return full
+    reserve = len(_omitted_marker(len(history))) + 1          # the marker line and its newline
+    used = len("\n".join(head))
+    kept = []
+    for line in history:
+        if used + 1 + len(line) + reserve > MESSAGE_LIMIT:
+            break
+        kept.append(line)
+        used += 1 + len(line)
+    out = "\n".join(head + kept + [_omitted_marker(len(history) - len(kept))])
+    # Unreachable while the per-field caps hold (the head is under ~1000 characters), but
+    # the limit is the contract, so enforce it last rather than trust the arithmetic above.
+    return out if len(out) <= MESSAGE_LIMIT else out[: MESSAGE_LIMIT - 3].rstrip() + "..."
+
+
 def format_closed_bottle(cid: str, all_records: list, end_rec: dict) -> str:
-    """Build the full-history report message for one just-closed bottle."""
+    """Build the full-history report message for one just-closed bottle.
+
+    Every ledger-derived string in it -- bottle id, task, result, reason, agent names,
+    unknown event names -- goes through sanitize(), and the whole message is capped."""
     bottle_records = [r for r in all_records if r.get("id") == cid]
     create_rec = next((r for r in bottle_records if r.get("event") == "create"), None)
-    task = sanitize(end_rec.get("task") or (create_rec or {}).get("task", ""), limit=300)
+    task = sanitize(end_rec.get("task") or (create_rec or {}).get("task", ""), limit=TASK_LIMIT)
     end_event = end_rec.get("event")
     icon = END_ICON.get(end_event, "🔔")
     label = END_LABEL.get(end_event, end_event)
 
-    lines = [f"{icon} [MIAB Bottle {label}] {cid}"]
+    lines = [f"{icon} [MIAB Bottle {label}] {sanitize(cid, limit=NAME_LIMIT)}"]
     if task:
         lines.append(f"   Task: {task}")
-    if end_event == "resolve" and end_rec.get("result"):
-        lines.append(f"   Result: {sanitize(end_rec.get('result'), limit=400)}")
-    if end_event == "cancel" and end_rec.get("reason"):
-        lines.append(f"   Reason: {end_rec.get('reason')}")
-    if end_event == "fail" and end_rec.get("reason"):
-        lines.append(f"   Reason: {end_rec.get('reason')}")
+    if end_event == "resolve":
+        result = sanitize(end_rec.get("result"), limit=RESULT_LIMIT)
+        if result:
+            lines.append(f"   Result: {result}")
+    if end_event in ("cancel", "fail"):
+        reason = sanitize(end_rec.get("reason"), limit=REASON_LIMIT)
+        if reason:
+            lines.append(f"   Reason: {reason}")
     lines.append(f"   Hops: {len(bottle_records)}")
     lines.append("   History:")
-    for r in bottle_records:
-        lines.append(f"     - {render_step(r)}")
-    return "\n".join(lines)
+    return _fit_report(lines, [f"     - {render_step(r)}" for r in bottle_records])
+
 
 # ----------------------------------------------------------------- collection
 def find_end_record(cid: str) -> dict | None:
@@ -411,9 +491,9 @@ def render_bottle(cid: str) -> tuple[str | None, str]:
     """Deterministic output for ONE closed bottle. Returns (message, status)."""
     end_rec = find_end_record(cid)
     if end_rec is None:
-        return None, f"No end-state (resolve/cancel/fail) event found for bottle {cid}."
+        return None, f"No end-state (resolve/cancel/fail) event found for bottle {sanitize(cid, limit=NAME_LIMIT)}."
     all_records = _parse_records(load_all_lines())
-    return format_closed_bottle(cid, all_records, end_rec), f"Rendered bottle {cid}."
+    return format_closed_bottle(cid, all_records, end_rec), f"Rendered bottle {sanitize(cid, limit=NAME_LIMIT)}."
 
 
 def is_delivered(cid: str) -> bool:
