@@ -28,13 +28,17 @@ Branch `t25-doctor`, rebased onto `main`, five commits. Suite **158 passed / 1 x
 
 Remaining before publish — all of it a Mac shell, tracked in `STATUS.md`'s punchlist: run the suite locally (doctor against the live config is clean), then merge (`--no-ff`), push, and publish **2.1.0** from the merge commit.
 
+## Observer 2.0.1 — notifier hardening (branch `observer-2.0.1`; **code-complete, not merged or published**)
+
+A patch ahead of R2, answering the findings ClawHub's scanners raised against the published observer 2.0.0. Only `notify_closed_bottles.py` and `notify_closed_dryrun.py` change. Decided 2026-10-06 and not open for redesign: a missing notifier state file starts at the ledger **end** and posts nothing (`finalize <cid>` posts an older bottle on demand); task, result and reason bodies still post, with no new environment variable and no metadata-only mode; and `miab_observer.py` keeps its cursor rewind until R2 merges the two cursors. What it does: a present-but-unusable `closed_bottle_state.json`, or a truncated ledger, fails closed (exit 1, nothing posted); the broker's rotation is told apart from truncation by a `ledger_head` fingerprint; every ledger-derived string is neutralised and capped before it reaches chat; the dry-run script imports the notifier instead of `exec_module`-ing it; SKILL.md, the skill card and the CHANGELOG say exactly what leaves the machine. Whether any scanner now rates the package differently is known only from a re-scan of the published 2.0.1.
+
 ## R2 — observer 2.1.0: the Phase 2 reader rewrite (target: ~Sep 20)
 
 ADR-001 Phase 2, the half not yet done. Merge `notify_closed_bottles.py` into `miab_observer.py`: **one cursor, one dedup model, one registry-sourced identity map**, pluggable sinks (`log`, `message`) — the structural fix for the two-cursor double-post class of bug. Fold the security catch-up in while the program is open rather than as a separate pass:
 
 - **Q1** path containment — `.resolve()` + confinement on all nine env-derived paths (`CLAW_QUEUE_LOG` is an arbitrary-append primitive today).
 - **Q3** file modes — `umask 0o077` + 0700/0600 (broker has this + tests; observer still writes state/log at ambient umask holding task/result text; shipped that way in 1.3.0).
-- **Q4/Q8** — specific exception handling on state load (no silent cursor reset) and unique tmp names in `save_state`.
+- **Q4/Q8** — specific exception handling on state load (no silent cursor reset) and unique tmp names in `save_state`. The notifier half of Q4 shipped in observer 2.0.1 (`read_state()`, `reconcile_cursor()`, the `ledger_head` fingerprint); the merged cursor should reuse that model rather than grow a second one.
 - **Q6** — observer `SECURITY.md` + `README.md`; declare network honestly for the message sink.
 - **Q7** — broker version floor as a runtime gate, not prose.
 - Retire `notify_closed_dryrun.py` into a `--dry-run` flag (ADR item 10).

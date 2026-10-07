@@ -1,7 +1,7 @@
 # miab-suite — STATUS
 
 > Sanitized 2026-08-31 for the public repo: live channel ids and personal identifiers are redacted; live values are in local config and project memory. Excluded from ClawHub packages (publish archives the skill dir only).
-> Last full update: **2026-09-01** (R1 code-complete; git state refreshed the same day). Partial update **2026-10-02**: the OpenClaw 2026.9.3 `agents.entries` migration (section below, git state, punchlist). Replaces `MIGRATION_PROMPT.md`, `T25-doctor-handoff.md`, `T25-doctor-pickup.md`, `miab-monorepo-kickoff-prompt.md`, `miab-broker-m3-kickoff.md` (originals deleted 2026-08-31).
+> Last full update: **2026-09-01** (R1 code-complete; git state refreshed the same day). Partial update **2026-10-02**: the OpenClaw 2026.9.3 `agents.entries` migration (section below, git state, punchlist). Partial update **2026-10-06**: the `observer-2.0.1` branch (git state, punchlist). Replaces `MIGRATION_PROMPT.md`, `T25-doctor-handoff.md`, `T25-doctor-pickup.md`, `miab-monorepo-kickoff-prompt.md`, `miab-broker-m3-kickoff.md` (originals deleted 2026-08-31).
 
 ## What this is
 
@@ -36,6 +36,7 @@ OpenClaw 2026.9.3 (reference deployment upgraded 2026-09-24) moved the agent ros
 - `t25-doctor` = `ca59fd3` (as of 2026-10-02), **rebased onto `main`** and **code-complete for R1**. Five commits atop `main`: the `doctor` subcommand, rename alignment + test-fixture scrub, the T24 `hops` fix, and the fragment-fill correction that came out of the first `doctor --json` run against a live install. and the `agents.entries` migration above. Suite on the branch: **158 passed / 1 xfailed**. The rebase went through a bundle round trip, not a checkout — the device bridge cannot perform a checkout that deletes files.
 - The pre-rebase branch head, which predates the fixture scrub, carries real identifiers in `tests/fixtures/openclaw.template.json` and **must never be pushed**. The rebased branch replaced them with synthetic ids.
 - Merged, deletable after push: `release-iq-1.3.0`, `rename-miab-observer`, `m3-trustworthy-routing`. A stray loose ref `refs/bundles/t25` is left over from the round trip — harmless, delete Mac-side.
+- `observer-2.0.1` — four commits atop `main` `94198b6` (`137dab8`, `d89e4bd`, `6728207`, `0ee623e`, plus a docs commit): the notifier-hardening patch described in `ROADMAP.md`. **Not merged, not pushed, not published.** Verified 2026-10-06 off-Mac (device bridge, Python 3.10.12 only): suite **426 passed / 1 xfailed** (the 158 + 1 baseline plus 268 new tests). Not verified: Python 3.12, a run on the Mac, and any live send to a chat channel (how Discord renders the neutralised text).
 - Tags `v1.3.0`, `v2.0.0` — tag *dates* are unreliable (history reconstructed ~08-19); trust the ClawHub listing for publish dates.
 
 ## Standing constraints (full rationale in ADR-001 + HISTORY.md)
@@ -67,6 +68,7 @@ Ordered; the first four gate the 2.1.0 publish.
 
 Standing, not gating 2.1.0:
 
+- [ ] **Review `observer-2.0.1`**, run the suite on the Mac (and under 3.12, which CI uses), merge it, then publish observer **2.0.1** from the merge commit (`git archive <commit> miab-observer | tar -x -C <tmp>`, then `clawhub skill publish miab-observer --version 2.0.1`). Before publishing, note what 2.0.1 changes for a host that runs the notifier from cron: no backfill on first run, and a corrupt state file or truncated ledger now exits 1 (CHANGELOG, "What changes for existing installs"). Re-scan the published package; nothing here claims a finding is cleared.
 - [ ] **Fix the cron `--command` path** for the closed-bottle notifier — it still points at the pre-T23 location, broken by both the script move and the directory rename. It fails silently.
 - [ ] Verify `openclaw.json` `skills.entries` paths post-rename with `openclaw skills list --verbose` — the loader keys on frontmatter `name`, not path, so shadowing is silent.
 - [ ] Verify the observer's non-empty `network:` value against ClawHub's schema (currently a descriptive string, still a guess).
