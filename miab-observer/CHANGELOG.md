@@ -17,9 +17,10 @@ The 1.2.0 section below was therefore reconstructed by diffing the published pac
 A patch release, and only the message sink changes: `scripts/notify_closed_bottles.py`, the one
 piece of this skill whose output leaves the machine, and `scripts/notify_closed_dryrun.py`, which
 shares its code. `miab_observer.py` (the log sink) is untouched. Every fix below answers a finding
-that ClawHub's scanners raised against the published 2.0.0 package. Whether the scanners now rate
-2.0.1 differently is something only a re-scan of the published package can show; this entry says what
-the code does now and how it was checked.
+that ClawHub's scanners raised against the published 2.0.0 package, except the ones marked as coming
+from the review of this release's own code. Whether the scanners now rate 2.0.1 differently is
+something only a re-scan of the published package can show; this entry says what the code does now and
+how it was checked.
 
 ### What changes for existing installs
 
@@ -55,6 +56,14 @@ Read this before upgrading a host that runs the notifier from cron.
 - **Small command changes.** `peek` now leaves out bottles already in `delivered_ids`, so it shows
   what `process` would send, and refuses a truncated ledger as `process` does. `status` gains
   `state_present`, `ledger_lines` and `ledger_head`. `on` checks `CLAW_CLOSED_TARGET` before it writes.
+- **A failed send makes `process` exit `1`.** In 2.0.0 a send that failed (the `openclaw` CLI exiting
+  non-zero, or not being runnable) parked the cursor on that bottle and `process` still exited `0`, so
+  a bottle whose send could never succeed held up every bottle behind it while cron saw success on
+  every run. Now `process` stops at the first failed send exactly as before (cursor on that bottle,
+  nothing after it sent, earlier successes recorded), prints its usual JSON summary on stdout with
+  `"ok": false`, `"delivered": false` and an `error` naming the bottle, and exits `1`. **A cron job
+  running the notifier will start reporting that exit code when a send fails; that is the intent.**
+  Every other `process` outcome still exits `0`, and its JSON gains `"ok": true`.
 - **No new environment variables, paths or permissions.** The `permissions` block is unchanged.
 
 ### Fixed
@@ -92,6 +101,13 @@ Read this before upgrading a host that runs the notifier from cron.
   committed text". It is an identifier, not a credential; the hazard of a default target is misdirected
   delivery. Corrected in both places.
 
+- **A failed send was invisible to cron** — from the review of this release's code, not a scanner
+  finding. `process` now exits `1` on the first failed send (see "What changes for existing installs").
+  Checked by `tests/test_notifier_delivery.py`: a send that fails for the first, a middle and the last
+  bottle of a batch (exit `1`, the summary names the bottle, nothing behind it is attempted, the cursor
+  is on its end record, the next run sends it and the rest once each), a send that never succeeds
+  (exit `1` on every run), the CLI missing from `PATH`, and `"ok": true` on every other outcome.
+
 ### Not addressed
 
 - **The log sink's cursor rewind.** `miab_observer.py` still resets a cursor beyond the ledger to 0.
@@ -101,8 +117,9 @@ Read this before upgrading a host that runs the notifier from cron.
 - **The `Hops:` line** counts the bottle's ledger lines, not delegation edges.
 - **File modes.** The state file is still written at the ambient umask (the broker has 0700/0600; the
   observer does not yet).
-- **A failed send still exits `0` from `process`.** The cursor stays on that bottle and the next run
-  retries it; only `finalize` exits `1`. Documented in SKILL.md §3a.
+- **A bottle whose send never succeeds still holds up the bottles behind it.** Delivery stays in
+  ledger order and nothing skips a bottle automatically; `process` now exits `1` on every run until
+  the send works, which is how it gets noticed.
 - **Neutralisation is text-level and covers mentions and masked links only.** Bare URLs and other
   markdown still render; length is counted in characters, not UTF-16 units.
 

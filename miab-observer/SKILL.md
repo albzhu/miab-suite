@@ -195,13 +195,17 @@ The notifier stops instead, and changes nothing:
 | 2.0.0 state file (no `ledger_head`), cursor beyond the ledger's length | Truncation and rotation look the same without a fingerprint. **Exit `1`**, nothing posted. | If the ledger was rotated, set `last_processed_line` to `0`; if it was truncated, set it to the ledger's line count; or delete the state file. |
 | Ledger missing or empty | No-op; state untouched. | Nothing to do. |
 | `CLAW_CLOSED_TARGET` unset | **Exit `1`**, nothing posted. | Set it. |
+| A send fails during `process` (the `openclaw` CLI exits non-zero or cannot be run) | The batch stops at that bottle: the cursor is saved on it, so the next run retries it first, and nothing after it is sent. Bottles delivered earlier in the same run stay recorded. **Exit `1`**, with the usual JSON summary on **stdout** (not stderr, because it also lists what the run did deliver) carrying `"ok": false`, `"delivered": false` and an `error` that names the bottle. | Fix the send: the `openclaw` CLI, `CLAW_CLOSED_TARGET`, `CLAW_CLOSED_ACCOUNT`. The next run retries that bottle, then the rest. Until it succeeds the bottle holds up every bottle behind it, and every run exits `1`. |
 
-`1` is deliberate: a cron `--command` job will report it, where a silent reset would not. Two
-things it does not cover. A send that fails during `process` (the CLI exits non-zero or cannot be
-run) does not make `process` exit `1`: the cursor stays on that bottle, nothing after it is sent, and
-the next run retries it. And bottles that closed in a ledger the broker has since rotated away, after
-the cursor but before the rotation, are not posted by the rotation path; to post one, point
-`CLAW_LEDGER` at the archived `ledger.<timestamp>.jsonl` for a single `finalize <cid>`.
+`1` is deliberate: a cron `--command` job will report it, where a silent reset would not. This
+includes a failed send during `process`, as `finalize` already did: a bottle whose send never
+succeeds holds up the ones behind it (delivery stays in ledger order), and the exit code is what
+makes that visible instead of looking like success on every run. Every other `process` outcome exits
+`0` and prints a summary with `"ok": true`.
+
+One thing the exit code does not cover: bottles that closed in a ledger the broker has since rotated
+away, after the cursor but before the rotation, are not posted by the rotation path; to post one,
+point `CLAW_LEDGER` at the archived `ledger.<timestamp>.jsonl` for a single `finalize <cid>`.
 
 Two known gaps, tracked and not addressed by this release: the two sinks still keep *separate*
 cursors and dedup state (ADR-001 item 7 merges them, Phase 2), and `notify_closed_dryrun.py` is

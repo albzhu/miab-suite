@@ -483,10 +483,10 @@ def test_delivery_failure_stops_the_cursor_and_the_next_run_retries(notifier):
     _seed(notifier, cursor=0)
 
     failed = notifier.run("process", exit_code=1, fail_only=B)
-    # SKILL.md section 3a documents this: a failed send parks the cursor and is retried, and
-    # does not turn `process` into an exit-1 (only `finalize` exits 1). Changing it is a
-    # decision to make on purpose, so it is pinned here rather than left to drift.
-    assert failed.returncode == 0, failed.stderr
+    # A failed send parks the cursor and is retried, and (since 2.0.1) makes `process` exit 1
+    # like `finalize`, so that cron sees a bottle that is blocking the queue. The full
+    # contract is pinned in tests/test_notifier_delivery.py.
+    assert failed.returncode == 1, failed.stderr
     attempts = [(c["exit"], [x for x in (A, B, C) if x in notifier.message_of(c)])
                 for c in notifier.calls()]
     assert attempts == [(0, [A]), (1, [B])], "C must not be attempted after B fails"

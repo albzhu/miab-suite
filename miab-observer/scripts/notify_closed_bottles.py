@@ -24,6 +24,12 @@ posted. A state file that exists but cannot be trusted, or a cursor that no long
 the ledger, makes the command exit 1 with {"ok": false, ...} on stderr and change nothing.
 `render` reads no state at all. See the "state" section below for the full rules.
 
+A send that fails during `process` stops the batch -- the cursor is saved on that bottle
+so the next run retries it, and nothing after it is sent -- and makes `process` exit 1,
+with the usual JSON summary on stdout carrying {"ok": false, "delivered": false, "error": ...}.
+A bottle whose send never succeeds therefore blocks the ones behind it, but every cron run
+reports it. Every `process` outcome that is not a failed send says "ok": true.
+
 Path resolution (mirrors miab_observer.py's conventions):
   - CLAW_HOME              : broker root                 (default: ~/.openclaw)
   - CLAW_LEDGER            : explicit ledger path         (overrides CLAW_HOME/state/callbacks/ledger.jsonl)
@@ -679,20 +685,20 @@ def main():
 
         if state is None:               # the only fresh start: record the ledger end, post nothing
             if total == 0:
-                _emit({"messages": [], "delivered": True,
+                _emit({"ok": True, "messages": [], "delivered": True,
                        "status": "Ledger missing or empty: nothing to scan, and no state file was created."})
                 return
             save_state(new_state(lines))
-            _emit({"messages": [], "delivered": True, "status": first_run_note(total)})
+            _emit({"ok": True, "messages": [], "delivered": True, "status": first_run_note(total)})
             return
 
         if not state.get("enabled", True):
-            print(json.dumps({"messages": [], "status": "Notifier DISABLED — skipping sweep.", "delivered": False}))
+            print(json.dumps({"ok": True, "messages": [], "status": "Notifier DISABLED — skipping sweep.", "delivered": False}))
             return
 
         plan = reconcile_cursor(state, lines)       # exits 1 on truncation / ambiguity
         if plan is None:
-            _emit({"messages": [], "delivered": True,
+            _emit({"ok": True, "messages": [], "delivered": True,
                    "status": "Ledger missing or empty: nothing to scan; state left untouched."})
             return
         cursor, head, note = plan
@@ -702,7 +708,8 @@ def main():
             if state.get("ledger_head") != head:        # learn the fingerprint of a 2.0.0 state
                 state["ledger_head"] = head
                 save_state(state)
-            _emit({"messages": [], "status": "No new callback events." + suffix, "delivered": True})
+            _emit({"ok": True, "messages": [], "status": "No new callback events." + suffix,
+                   "delivered": True})
             return
 
         all_records = parse_records(lines)
@@ -710,13 +717,15 @@ def main():
         skipped = []
         # Deliver in order; stop advancing the cursor at the first delivery
         # failure so nothing is skipped on the next run (at-least-once,
-        # exactly-once in the common case).
+        # exactly-once in the common case). A failure also ends the run with exit 1, so
+        # that a bottle whose send keeps failing is seen by cron on every run.
         #
         # The cursor alone is NOT a dedup guard. `finalize` (the claw-callback
         # hook) records ids in delivered_ids without moving the cursor, so any
         # bottle it announced still sits in this scan window. Consult
         # delivered_ids per bottle — that is the only guard both paths share.
         new_cursor = total
+        failed_cid = None
         for i, rec in enumerate(all_records[cursor:], start=cursor):
             cid = end_bottle_id(rec)
             if cid is None:
@@ -730,6 +739,7 @@ def main():
                 _remember_delivered(state, cid)
             else:
                 new_cursor = i
+                failed_cid = cid
                 break
 
         state["last_processed_line"] = new_cursor
@@ -740,12 +750,20 @@ def main():
         if skipped:
             status += f" Skipped {len(skipped)} already-delivered: {', '.join(skipped)}."
         status += suffix
-        print(json.dumps({
+        summary = {
+            "ok": failed_cid is None,
             "messages": delivered_msgs,
             "skipped_already_delivered": skipped,
             "status": status,
-            "delivered": True,
-        }, indent=2))
+            "delivered": failed_cid is None,
+        }
+        if failed_cid is not None:
+            # The summary stays on stdout: it also says what this run did deliver.
+            summary["error"] = (f"Delivery failed for bottle {sanitize(failed_cid, limit=NAME_LIMIT)}; "
+                                f"the cursor stays on it (line {new_cursor}) and the next run retries it.")
+            print(json.dumps(summary, indent=2))
+            sys.exit(1)
+        print(json.dumps(summary, indent=2))
         return
 
     print(json.dumps({"ok": False, "error": f"unknown command: {cmd}",
