@@ -96,6 +96,86 @@ def test_first_run_with_no_ledger_writes_nothing(notifier, ledger_text):
     assert not notifier.state_path.exists()
 
 
+NO_LEDGER = pytest.mark.parametrize(
+    "ledger_text", [None, "", "\n  \n\n"], ids=["ledger-missing", "ledger-empty", "ledger-blank-lines"])
+
+
+@NO_LEDGER
+def test_the_first_run_status_for_an_empty_ledger_names_the_gap_and_the_remedy(notifier, ledger_text):
+    """Nothing is recorded when there is no ledger yet, so a bottle that closes before the
+    first `process` run that sees a non-empty ledger is never posted. That is deliberate
+    (see the next tests), which is exactly why the status output has to say it."""
+    if ledger_text is not None:
+        notifier.ledger.write_text(ledger_text, encoding="utf-8")
+
+    r = notifier.run("process")
+    assert r.returncode == 0, r.stderr
+    status = json.loads(r.stdout)["status"]
+    assert "no state file was created" in status
+    assert "will not be posted" in status
+    assert "non-empty ledger" in status
+    assert "`on` records the ledger start" in status
+    # ... and saying so changes nothing else.
+    assert not notifier.state_path.exists()
+    assert notifier.calls() == []
+    assert notifier.callbacks_listing() == ([] if ledger_text is None else ["ledger.jsonl"])
+
+
+@NO_LEDGER
+def test_a_bottle_that_closes_before_the_first_run_that_sees_a_ledger_is_not_posted(notifier, ledger_text):
+    """The gap itself, pinned so that the documentation of it stays true: `process` records
+    nothing for an empty ledger (a cursor of 0 there would backfill a whole history if
+    CLAW_LEDGER was mistyped at first and corrected later), so the first run that does see
+    a ledger starts at ITS end. Bottles that close afterwards are posted."""
+    if ledger_text is not None:
+        notifier.ledger.write_text(ledger_text, encoding="utf-8")
+    assert notifier.run("process").returncode == 0
+    assert not notifier.state_path.exists()
+
+    notifier.write_ledger(make_bottle(A, "resolve", t0=0))              # opens and closes
+    r = notifier.run("process")
+    assert r.returncode == 0, r.stderr
+    assert notifier.calls() == [], "A closed before the first run that saw a ledger"
+    assert notifier.state()["last_processed_line"] == 3
+
+    notifier.append_ledger(make_bottle(B, "resolve", t0=10))
+    assert notifier.run("process").returncode == 0
+    assert _delivered_ids(notifier) == [B]
+
+
+@NO_LEDGER
+def test_running_on_first_closes_the_gap_by_recording_the_ledger_start(notifier, ledger_text):
+    """The remedy the status output and SKILL.md give: `on` against a missing or empty
+    ledger records cursor 0, so the first bottle to close is posted exactly once."""
+    if ledger_text is not None:
+        notifier.ledger.write_text(ledger_text, encoding="utf-8")
+    r = notifier.run("on")
+    assert r.returncode == 0, r.stderr
+    assert notifier.state() == {"enabled": True, "last_processed_line": 0, "delivered_ids": []}
+
+    notifier.write_ledger(make_bottle(A, "resolve", t0=0))
+    assert notifier.run("process").returncode == 0
+    assert _delivered_ids(notifier) == [A]
+    assert notifier.state()["last_processed_line"] == 3
+    assert notifier.state()["ledger_head"] == notifier.ledger_head()
+
+    assert notifier.run("process").returncode == 0
+    assert _delivered_ids(notifier) == [A], "and only once"
+
+
+def test_on_against_a_mistyped_ledger_path_backfills_once_the_path_is_corrected(notifier):
+    """Why `process` does not do for an empty ledger what `on` does, and why SKILL.md says to
+    run `on` only once CLAW_LEDGER is right: a cursor of 0 recorded against the wrong path
+    is a cursor of 0 against the right ledger, history and all."""
+    wrong = notifier.callbacks / "typo-ledger.jsonl"                    # never created
+    assert notifier.run("on", extra_env={"CLAW_LEDGER": str(wrong)}).returncode == 0
+    assert notifier.state()["last_processed_line"] == 0
+
+    notifier.write_ledger(THREE)                                         # the path, corrected
+    assert notifier.run("process").returncode == 0
+    assert _delivered_ids(notifier) == [A, B, C]
+
+
 @pytest.mark.parametrize("command", ["on", "off"])
 def test_on_and_off_against_missing_state_do_not_cause_a_later_backfill(notifier, command):
     """Test 2. `on` / `off` create the state when there is none. It must be the same

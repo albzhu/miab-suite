@@ -32,6 +32,14 @@ Read this before upgrading a host that runs the notifier from cron.
   ledger: `process`, `on`, `off` and `finalize` all record the current ledger length as the cursor,
   post nothing, and say so in the status output. `finalize <cid>` is still how you post one older
   bottle on demand.
+- **On a fresh install, a bottle that closes before the first run that sees a ledger is not posted.**
+  With no state file and a missing or empty ledger, `process` records nothing (it does not create a state
+  file), so the first `process` run that sees a non-empty ledger starts at *that* ledger's end. Run `on`
+  first and the gap closes: `on` records the ledger start (cursor 0). **This is deliberate, and `process`
+  will not do it for you**: recording cursor 0 whenever the ledger is empty would backfill the entire
+  history if `CLAW_LEDGER` was mistyped at first and corrected later (for the same reason, run `on` only
+  once `CLAW_LEDGER` is right). The `process` status message for that case now says it, and SKILL.md §3a
+  states it in the first-run section and in the table.
 - **A corrupt state file, or a truncated ledger, now exits `1`.** Before, an unreadable or invalid
   state file was silently replaced with cursor 0 and an empty `delivered_ids`, and a cursor beyond the
   ledger was silently reset to 0; both re-posted every closed bottle in the ledger. Now the notifier

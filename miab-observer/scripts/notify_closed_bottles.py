@@ -609,6 +609,17 @@ def _emit(payload: dict) -> None:
     print(json.dumps(payload, indent=2))
 
 
+# With no state file and nothing in the ledger there is no "end" to record, so `process`
+# writes nothing -- on purpose: a cursor of 0 recorded against an empty ledger would backfill
+# the whole history if CLAW_LEDGER was mistyped at first and corrected later. The cost is that
+# a bottle which closes before the first run that sees a non-empty ledger is never posted,
+# and `on` (which records cursor 0) is how an operator who wants those posted says so.
+EMPTY_LEDGER_FIRST_RUN_NOTE = (
+    "Ledger missing or empty: nothing to scan, and no state file was created. "
+    "Bottles that close before the first run that sees a non-empty ledger will not be posted; "
+    "`on` records the ledger start so that they are.")
+
+
 def first_run_note(total: int) -> str:
     return (f"First run: no state file, so the cursor starts at the ledger end (line {total}) "
             "and nothing is posted. Bottles that close from now on are delivered; "
@@ -709,7 +720,7 @@ def main():
         if state is None:               # the only fresh start: record the ledger end, post nothing
             if total == 0:
                 _emit({"ok": True, "messages": [], "delivered": True,
-                       "status": "Ledger missing or empty: nothing to scan, and no state file was created."})
+                       "status": EMPTY_LEDGER_FIRST_RUN_NOTE})
                 return
             save_state(new_state(lines))
             _emit({"ok": True, "messages": [], "delivered": True, "status": first_run_note(total)})
