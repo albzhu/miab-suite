@@ -491,3 +491,10 @@ def test_the_last_resort_cut_trims_whole_code_points_until_the_message_fits(nb, 
 def test_the_last_resort_cut_still_drops_trailing_whitespace_before_the_ellipsis(nb):
     out = nb._fit_report(["A" * 1893 + " " * 4 + "B" * 100], ["x"])
     assert out == "A" * 1893 + "..."
+
+
+def test_the_last_resort_cut_of_plain_text_keeps_every_unit_it_may(nb):
+    """Plain ASCII over the limit: 1897 characters and "..." make exactly 1900, no fewer."""
+    out = nb._fit_report(["a" * 2500], ["x"])
+    assert out == "a" * 1897 + "..."
+    assert units(out) == 1900
