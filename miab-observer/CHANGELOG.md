@@ -109,14 +109,12 @@ Read this before upgrading a host that runs the notifier from cron.
 - **Wording:** SKILL.md and the `target_channel()` docstring called a hardcoded channel id "a secret in
   committed text". It is an identifier, not a credential; the hazard of a default target is misdirected
   delivery. Corrected in both places.
-
 - **A failed send was invisible to cron** — from the review of this release's code, not a scanner
   finding. `process` now exits `1` on the first failed send (see "What changes for existing installs").
   Checked by `tests/test_notifier_delivery.py`: a send that fails for the first, a middle and the last
   bottle of a batch (exit `1`, the summary names the bottle, nothing behind it is attempted, the cursor
   is on its end record, the next run sends it and the rest once each), a send that never succeeds
   (exit `1` on every run), the CLI missing from `PATH`, and `"ok": true` on every other outcome.
-
 - **A crash or kill mid-batch re-posted the whole batch** — from the review of this release's code, not
   a scanner finding. `process` saved its state once, after the last send, so a process killed between a
   send and that save posted every bottle of the batch again on the next run. It now saves after every
@@ -127,7 +125,6 @@ Read this before upgrading a host that runs the notifier from cron.
   `tests/test_notifier_delivery.py`, in which the stand-in `openclaw` SIGKILLs the notifier during the
   send for the first, second and third bottle of a batch; the test reads the state left on disk, runs
   `process` again, and counts what was posted.
-
 - **The 1900 cap was counted in code points, not UTF-16 units** — from the review of this release's
   code, not a scanner finding. `len()` counts code points, and an emoji is one code point but two UTF-16
   code units: a bottle whose task, result, reason, agent names and history were all emoji came out at

@@ -193,7 +193,7 @@ ledger start (cursor 0); `finalize <cid>` still posts any one you missed. `proce
 itself because a cursor of 0 recorded against an empty ledger would backfill the whole history if
 `CLAW_LEDGER` was mistyped at first and corrected later, and a missed first bottle costs less than that.
 For the same reason, run `on` only once `CLAW_LEDGER` points at the ledger you mean: against a wrong
-path it records cursor 0 too. The status output of that `process` run says all of this.
+path it records cursor 0 too. The status output of that `process` run states the gap and the remedy.
 
 A state file that exists but cannot be trusted, or a cursor that no longer fits the ledger, is never
 "fixed" by starting over, because starting over re-posts every closed bottle in the ledger to chat.
