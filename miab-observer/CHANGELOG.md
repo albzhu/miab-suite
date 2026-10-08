@@ -108,6 +108,17 @@ Read this before upgrading a host that runs the notifier from cron.
   is on its end record, the next run sends it and the rest once each), a send that never succeeds
   (exit `1` on every run), the CLI missing from `PATH`, and `"ok": true` on every other outcome.
 
+- **A crash or kill mid-batch re-posted the whole batch** — from the review of this release's code, not
+  a scanner finding. `process` saved its state once, after the last send, so a process killed between a
+  send and that save posted every bottle of the batch again on the next run. It now saves after every
+  successful send (the id in `delivered_ids`, the cursor just past that bottle's end record,
+  `ledger_head`), before it attempts the next, and once more when the batch ends. Writes stay atomic, and
+  the file, its name and its existing keys are unchanged. **At most one bottle can still be re-posted:
+  the one whose send had completed when the process died, before its save.** Checked by
+  `tests/test_notifier_delivery.py`, in which the stand-in `openclaw` SIGKILLs the notifier during the
+  send for the first, second and third bottle of a batch; the test reads the state left on disk, runs
+  `process` again, and counts what was posted.
+
 ### Not addressed
 
 - **The log sink's cursor rewind.** `miab_observer.py` still resets a cursor beyond the ledger to 0.
@@ -117,6 +128,8 @@ Read this before upgrading a host that runs the notifier from cron.
 - **The `Hops:` line** counts the bottle's ledger lines, not delegation edges.
 - **File modes.** The state file is still written at the ambient umask (the broker has 0700/0600; the
   observer does not yet).
+- **Delivery is exactly-once only up to a one-bottle window.** A send that completes in the instant
+  before the process dies is not yet recorded, so that one bottle is posted again on the next run.
 - **A bottle whose send never succeeds still holds up the bottles behind it.** Delivery stays in
   ledger order and nothing skips a bottle automatically; `process` now exits `1` on every run until
   the send works, which is how it gets noticed.

@@ -14,12 +14,17 @@ What these tests pin (the decisions Albert made for 2.0.1):
     failing bottle, earlier successes recorded) and exits 1 with the usual JSON summary on
     stdout carrying `"ok": false`, `"delivered": false` and an `error` naming the bottle;
   * a run with no failed send exits 0 and its output gains `"ok": true`;
-  * `finalize` is unchanged: it already exits 1 on a failed send.
+  * `finalize` is unchanged: it already exits 1 on a failed send;
+  * the state is saved after EVERY successful send (id in `delivered_ids`, cursor just past
+    that bottle's end record, `ledger_head`), before the next send is attempted, so a process
+    killed mid-batch can re-post at most the one bottle whose send had completed but whose
+    save had not.
 
 Every delivery goes to the fake `openclaw` the `notifier` fixture puts first on PATH; see
 tests/conftest.py. These tests cannot reach the real CLI.
 """
 import json
+import signal
 import subprocess
 import sys
 
@@ -198,3 +203,83 @@ def test_every_process_outcome_that_is_not_a_failed_send_says_ok_true(notifier, 
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["ok"] is True
     assert notifier.messages() == []
+
+
+# ------------------------------------------------- the state is saved after every delivery
+#
+# These runs make the end-of-batch save unreachable: the fake `openclaw` SIGKILLs the
+# notifier right after logging the send for `victim` (see FAKE_OPENCLAW_KILL_PARENT_ON in
+# tests/conftest.py). What is on disk afterwards is therefore only what the notifier saved
+# between sends. That send is the one that completed without being recorded.
+
+def _cursor_after(bottle):
+    return END_LINE[bottle] + 1
+
+
+def _killed_during(notifier, victim):
+    r = notifier.run("process", kill_parent_on=victim)
+    assert r.returncode == -signal.SIGKILL, (r.returncode, r.stdout, r.stderr)
+    return r
+
+
+@pytest.mark.parametrize("victim", ORDER, ids=["kill-on-first", "kill-on-second", "kill-on-third"])
+def test_a_kill_mid_batch_reposts_at_most_the_one_bottle_being_sent(notifier, victim):
+    """The window: a send completed (the fake logged it with exit 0) and the notifier died
+    before it could record it. Every bottle sent before that one is already in
+    `delivered_ids` with the cursor past it, so the next run repeats only the victim."""
+    _start_at_zero(notifier)
+    before = ORDER[:ORDER.index(victim)]
+    after = ORDER[ORDER.index(victim) + 1:]
+
+    _killed_during(notifier, victim)
+
+    assert _attempts(notifier) == [(0, [x]) for x in before + [victim]]
+    state = notifier.state()                       # still a whole, loadable file
+    assert state["enabled"] is True
+    assert state["delivered_ids"] == before, "each earlier send was recorded as it completed"
+    assert state["last_processed_line"] == (_cursor_after(before[-1]) if before else 0)
+    assert notifier.callbacks_listing() == ["closed_bottle_state.json", "ledger.jsonl"], (
+        "saves are atomic: no temporary file is left behind")
+
+    r = notifier.run("process")
+    assert r.returncode == 0, r.stderr
+    sent = [x for m in notifier.messages() for x in ORDER if x in m]
+    assert sent == before + [victim] + [victim] + after, (
+        "only the victim is posted twice; nothing before it is repeated, nothing after it is lost")
+    state = notifier.state()
+    assert state["delivered_ids"] == ORDER
+    assert state["last_processed_line"] == TOTAL
+
+
+@pytest.mark.parametrize("seed", [
+    pytest.param({"last_processed_line": 0}, id="state-written-by-2.0.0"),
+    pytest.param({"last_processed_line": TOTAL + 5, "ledger_head": "0" * 64}, id="rotated-ledger"),
+])
+def test_each_save_also_records_the_ledger_the_cursor_belongs_to(notifier, seed):
+    """A per-send save is a whole state, not just a new id: it carries the cursor for THIS
+    ledger and its fingerprint, so a run that dies afterwards does not leave a cursor from
+    the old ledger beside the new ledger's delivered ids."""
+    notifier.write_ledger(THREE)
+    notifier.write_state({"enabled": True, "delivered_ids": [], **seed})
+
+    _killed_during(notifier, B)
+
+    state = notifier.state()
+    assert state["delivered_ids"] == [A]
+    assert state["last_processed_line"] == _cursor_after(A)
+    assert state["ledger_head"] == notifier.ledger_head()
+
+
+def test_a_kill_after_a_skipped_bottle_keeps_what_finalize_recorded(notifier):
+    """`finalize` records ids without moving the cursor, so a batch can step over a bottle
+    that was already announced. The per-send saves must keep that id, add the new ones, and
+    leave the cursor just past the last bottle actually sent."""
+    notifier.write_ledger(THREE)
+    notifier.write_state({"enabled": True, "last_processed_line": 0, "delivered_ids": [A]})
+
+    _killed_during(notifier, C)
+
+    assert _attempts(notifier) == [(0, [B]), (0, [C])], "A is skipped, not re-sent"
+    state = notifier.state()
+    assert state["delivered_ids"] == [A, B]
+    assert state["last_processed_line"] == _cursor_after(B)

@@ -106,12 +106,22 @@ def cb_module():
 # with FAKE_OPENCLAW_EXIT, optionally only for calls whose argv contains
 # FAKE_OPENCLAW_FAIL_ONLY, so a test can assert both "nothing was sent" and
 # "this one delivery failed".
+#
+# FAKE_OPENCLAW_KILL_PARENT_ON (opt-in; `kill_parent_on=` on env() / run()) makes the fake
+# SIGKILL its parent -- the notifier, because the wrapper `exec`s the fake -- right after it
+# has logged a call whose argv contains that string, and then exit with the code it chose
+# as usual. The send is on record and the notifier never learns of it, nor runs another
+# line: a process killed between a completed send and whatever it would have done next. It
+# is how a test looks at what is ALREADY on disk at that moment, with the end-of-batch save
+# made unreachable. The run's returncode is then -signal.SIGKILL. Only the notifier is ever
+# the fake's parent here, so the variable cannot reach the pytest process.
 # ---------------------------------------------------------------------------
 SYNTHETIC_TARGET = "channel:100000000000000001"
 
 _FAKE_OPENCLAW_PY = """\
 import json
 import os
+import signal
 import sys
 
 argv = sys.argv[1:]
@@ -121,6 +131,9 @@ if only and not any(only in a for a in argv):
     code = 0
 with open(os.environ["FAKE_OPENCLAW_LOG"], "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"argv": argv, "exit": code}) + "\\n")
+kill_on = os.environ.get("FAKE_OPENCLAW_KILL_PARENT_ON")
+if kill_on and any(kill_on in a for a in argv):
+    os.kill(os.getppid(), signal.SIGKILL)
 if code:
     sys.stderr.write("fake openclaw: simulated delivery failure\\n")
 sys.exit(code)
@@ -183,7 +196,7 @@ class NotifierHarness:
         assert found == str(wrapper), f"fake openclaw not first on PATH: {found}"
 
     # -- environment ----------------------------------------------------------
-    def env(self, *, exit_code=0, fail_only=None, extra=None):
+    def env(self, *, exit_code=0, fail_only=None, kill_parent_on=None, extra=None):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(_SCRUBBED_ENV_PREFIXES)}
         env.update({
@@ -198,16 +211,20 @@ class NotifierHarness:
         })
         if fail_only is not None:
             env["FAKE_OPENCLAW_FAIL_ONLY"] = fail_only
+        if kill_parent_on is not None:
+            env["FAKE_OPENCLAW_KILL_PARENT_ON"] = kill_parent_on
         if extra:
             env.update(extra)
         assert shutil.which("openclaw", path=env["PATH"]) == str(self.bin_dir / "openclaw")
         return env
 
-    def run(self, *args, script=NOTIFY_SCRIPT, exit_code=0, fail_only=None, extra_env=None):
+    def run(self, *args, script=NOTIFY_SCRIPT, exit_code=0, fail_only=None, kill_parent_on=None,
+            extra_env=None):
         return subprocess.run(
             [sys.executable, str(script), *args],
             capture_output=True, text=True, encoding="utf-8", cwd=self.tmp_path, timeout=60,
-            env=self.env(exit_code=exit_code, fail_only=fail_only, extra=extra_env))
+            env=self.env(exit_code=exit_code, fail_only=fail_only,
+                         kill_parent_on=kill_parent_on, extra=extra_env))
 
     # -- ledger ---------------------------------------------------------------
     def write_ledger(self, records):

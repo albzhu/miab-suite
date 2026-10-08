@@ -30,6 +30,12 @@ with the usual JSON summary on stdout carrying {"ok": false, "delivered": false,
 A bottle whose send never succeeds therefore blocks the ones behind it, but every cron run
 reports it. Every `process` outcome that is not a failed send says "ok": true.
 
+`process` saves its state after EVERY successful send (the id in delivered_ids, the cursor
+just past that bottle's end record, the ledger fingerprint), before it attempts the next,
+and once more when the batch ends. A process killed mid-batch can therefore re-post at most
+the one bottle whose send had completed but whose save had not: it is exactly-once only up
+to that window.
+
 Path resolution (mirrors miab_observer.py's conventions):
   - CLAW_HOME              : broker root                 (default: ~/.openclaw)
   - CLAW_LEDGER            : explicit ledger path         (overrides CLAW_HOME/state/callbacks/ledger.jsonl)
@@ -513,8 +519,8 @@ DELIVERED_IDS_CAP = 500
 def _remember_delivered(state: dict, cid: str) -> None:
     """Record `cid` as delivered in an in-memory state dict, bounded.
 
-    Callers that also mutate the cursor MUST use this and save once, rather than
-    mark_delivered() — that re-reads state from disk and would drop their cursor.
+    Callers that also mutate the cursor MUST use this and save that dict themselves, rather
+    than mark_delivered() — that re-reads state from disk and would drop their cursor.
     """
     ids = state.setdefault("delivered_ids", [])
     if cid not in ids:
@@ -724,6 +730,12 @@ def main():
         # hook) records ids in delivered_ids without moving the cursor, so any
         # bottle it announced still sits in this scan window. Consult
         # delivered_ids per bottle — that is the only guard both paths share.
+        #
+        # Save after EVERY successful send, before the next one is attempted: state saved
+        # once per batch meant a kill between a send and that save re-posted the whole
+        # batch. Now only the bottle whose send completed but whose save did not can be
+        # posted again. The end-of-batch save below still moves the cursor to the ledger
+        # end (or onto the failed record).
         new_cursor = total
         failed_cid = None
         for i, rec in enumerate(all_records[cursor:], start=cursor):
@@ -737,6 +749,9 @@ def main():
             if deliver_one(msg):
                 delivered_msgs.append(msg)
                 _remember_delivered(state, cid)
+                state["last_processed_line"] = i + 1        # just past this bottle's end record
+                state["ledger_head"] = head
+                save_state(state)
             else:
                 new_cursor = i
                 failed_cid = cid

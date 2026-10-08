@@ -207,6 +207,14 @@ One thing the exit code does not cover: bottles that closed in a ledger the brok
 away, after the cursor but before the rotation, are not posted by the rotation path; to post one,
 point `CLAW_LEDGER` at the archived `ledger.<timestamp>.jsonl` for a single `finalize <cid>`.
 
+**State is saved after every send.** `process` records each bottle (its id in `delivered_ids`, the
+cursor just past its end record, `ledger_head`) as soon as its send succeeds, before it attempts the
+next one, and once more when the batch ends. If the process is killed after a send has completed but
+before that save, that one bottle is posted again by the next run, and no other: everything sent
+before it is already recorded. So delivery is exactly-once except for a one-bottle window. (2.0.0
+saved once, after the whole batch, so a kill part-way through re-posted every bottle that run had
+already sent.)
+
 Two known gaps, tracked and not addressed by this release: the two sinks still keep *separate*
 cursors and dedup state (ADR-001 item 7 merges them, Phase 2), and `notify_closed_dryrun.py` is
 still a separate script rather than a `--dry-run` flag (ADR-001 item 10).
