@@ -330,7 +330,7 @@ TASK_LIMIT = 300
 RESULT_LIMIT = 400
 REASON_LIMIT = 300
 NAME_LIMIT = 64          # agent names, unknown event names and bottle ids
-MESSAGE_LIMIT = 1900     # the whole report; Discord's own cap is 2000
+MESSAGE_LIMIT = 1900     # the whole report, in UTF-16 code units (utf16_units()); Discord's own cap is 2000
 
 ZWSP = "\u200b"          # zero-width space: what makes a mention or masked link inert
 
@@ -438,29 +438,46 @@ def end_bottle_id(rec: dict) -> str | None:
         return cid
     return None
 
+def utf16_units(text: str) -> int:
+    """The length of `text` in UTF-16 code units: a character outside the Basic Multilingual
+    Plane (most emoji) is one code point but two units. Never less than len(text), so a
+    limit applied to this holds whether the receiving end counts code points or units.
+    Raises on a lone surrogate, which sanitize() has already removed from everything that
+    reaches the report."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _omitted_marker(n: int) -> str:
     return f"     ... {n} more history line(s) omitted"
 
 
 def _fit_report(head: list, history: list) -> str:
-    """Join the report, at most MESSAGE_LIMIT characters. If the full history does not fit,
-    whole history lines are dropped from the END and an explicit marker says how many, so a
-    long delegation chain is visibly cut rather than silently or mid-line."""
+    """Join the report, at most MESSAGE_LIMIT UTF-16 code units. If the full history does not
+    fit, whole history lines are dropped from the END and an explicit marker says how many,
+    so a long delegation chain is visibly cut rather than silently or mid-line."""
     full = "\n".join(head + history)
-    if len(full) <= MESSAGE_LIMIT:
+    if utf16_units(full) <= MESSAGE_LIMIT:
         return full
-    reserve = len(_omitted_marker(len(history))) + 1          # the marker line and its newline
-    used = len("\n".join(head))
+    reserve = utf16_units(_omitted_marker(len(history))) + 1  # the marker line and its newline
+    used = utf16_units("\n".join(head))
     kept = []
     for line in history:
-        if used + 1 + len(line) + reserve > MESSAGE_LIMIT:
+        width = 1 + utf16_units(line)                         # the line and its newline
+        if used + width + reserve > MESSAGE_LIMIT:
             break
         kept.append(line)
-        used += 1 + len(line)
+        used += width
     out = "\n".join(head + kept + [_omitted_marker(len(history) - len(kept))])
-    # Unreachable while the per-field caps hold (the head is under ~1000 characters), but
-    # the limit is the contract, so enforce it last rather than trust the arithmetic above.
-    return out if len(out) <= MESSAGE_LIMIT else out[: MESSAGE_LIMIT - 3].rstrip() + "..."
+    if utf16_units(out) <= MESSAGE_LIMIT:
+        return out
+    # Unreachable while the per-field caps hold (the head is well under the limit even when
+    # every character is an emoji), but the limit is the contract, so enforce it last rather
+    # than trust the arithmetic above. Trim whole code points until "..." fits after them: a
+    # cut that fell between the two halves of a surrogate pair would leave a lone surrogate.
+    cut = out[: MESSAGE_LIMIT - 3]
+    while cut and utf16_units(cut) + 3 > MESSAGE_LIMIT:
+        cut = cut[:-1]
+    return cut.rstrip() + "..."
 
 
 def format_closed_bottle(cid: str, all_records: list, end_rec: dict) -> str:

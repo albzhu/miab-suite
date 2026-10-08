@@ -151,8 +151,11 @@ task, result, every reason, agent names, event names):
   `<@id>`, `<@!id>`, `<@&id>` and `<#id>` do not mention anyone;
 - `](` is split, so `[text](url)` does not render as a masked link;
 - each field is capped (task 300 characters, result 400, reason 300, agent and event names and ids
-  64) and so is the whole message (1900); when history lines are dropped to fit, the message says
-  how many.
+  64), and so is the whole message, at 1900 UTF-16 code units (a character outside the Basic
+  Multilingual Plane, such as most emoji, counts as two). Units are never fewer than characters, so
+  the cap holds whether the receiving end counts characters or units; a message that is mostly emoji
+  therefore carries fewer than 1900 characters. When history lines are dropped to fit, the message
+  says how many.
 
 That is the whole of it. Bare URLs and other markdown still render, and the cleaning is text-level:
 nothing is added to the `openclaw message send` call. It is tested against the exact text handed to

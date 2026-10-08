@@ -7,20 +7,23 @@ length; `reason` skipped it entirely, and nothing neutralised `@everyone`, `@her
 `<@…>`, `<@&…>`, `<#…>` or masked links. These tests pin the behaviour that replaced it:
 
   * one neutralising function, applied to EVERY ledger-derived string;
-  * per-field caps (task 300, result 400, reason 300, names 64) and a 1900-character
-    cap on the whole message, with an explicit marker when history lines are dropped.
+  * per-field caps (task 300, result 400, reason 300, names 64, counted in characters) and
+    a cap of 1900 UTF-16 code units on the whole message -- never fewer than its characters,
+    so the cap holds whichever way the receiving end counts -- with an explicit marker when
+    history lines are dropped.
 
 They assert on the `--message` argv the fake `openclaw` received — the text that would
 actually have left the machine — never on a helper's return value. They say nothing
 about how Discord renders that text; that needs a live send.
 """
+import importlib.util
 import json
 import re
 import unicodedata
 
 import pytest
 
-from conftest import make_bottle
+from conftest import NOTIFY_SCRIPT, make_bottle
 
 ZWSP = "\u200b"
 CID = "cb-20260101000000-aaa001"
@@ -327,3 +330,164 @@ def test_process_posts_the_same_neutralised_text_finalize_does(notifier):
     assert via_process == via_finalize
     assert len(via_process) <= 1900
     assert "@everyone" not in via_process and "<@" not in via_process
+
+
+# ------------------------------------------------------- the whole-message cap, in UTF-16 units
+#
+# MESSAGE_LIMIT is measured in UTF-16 code units, not code points: a character outside the
+# Basic Multilingual Plane (an emoji, say) is one code point and TWO units. 1826 emoji are
+# 1826 characters and 3652 units, so a cap counted in characters would let through a message
+# that a receiving end counting units rejects -- every time, for that bottle, for good.
+
+EMOJI = chr(0x1F600)                       # U+1F600: one code point, two UTF-16 code units
+LONE_SURROGATE = re.compile("[" + chr(0xD800) + "-" + chr(0xDFFF) + "]")
+
+
+def units(text):
+    """UTF-16 code units. Raises UnicodeEncodeError on a lone surrogate, which is itself a
+    useful check that none got in."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+@pytest.fixture(scope="module")
+def nb():
+    """The notifier as a module, for the helpers a CLI run cannot reach on its own."""
+    spec = importlib.util.spec_from_file_location("notify_closed_bottles_under_test", NOTIFY_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _astral_history(recs):
+    """Sixty forwarded hops between agents whose names are all emoji, and a quarantine line
+    whose reason is all emoji, inserted after `create`."""
+    recs.insert(1, {"at": "2026-01-01T00:00:30Z", "id": CID, "event": "corrupt",
+                    "by": "system", "reason": EMOJI * 5000})
+    for i in range(60):
+        recs.insert(1, {"at": f"2026-01-01T00:01:{i:02d}Z", "id": CID, "event": "forward",
+                        "by": EMOJI * 100, "to": EMOJI * 100})
+    return recs
+
+
+def _all_astral_resolve():
+    recs = make_bottle(CID, "resolve", task=EMOJI * 5000, result=EMOJI * 5000, by=EMOJI * 100)
+    recs[0]["to"] = EMOJI * 100
+    return _astral_history(recs)
+
+
+def _all_astral_cancel():
+    recs = make_bottle(CID, "cancel", task=EMOJI * 5000, reason=EMOJI * 5000, by=EMOJI * 100)
+    recs[0]["to"] = EMOJI * 100
+    return _astral_history(recs)
+
+
+def _all_astral_fail():
+    recs = make_bottle(CID, "fail", task=EMOJI * 5000, reason=EMOJI * 5000, by=EMOJI * 100)
+    recs[0]["to"] = EMOJI * 100
+    return _astral_history(recs)
+
+
+@pytest.mark.parametrize("build", [_all_astral_resolve, _all_astral_cancel, _all_astral_fail],
+                         ids=["resolve", "cancel", "fail"])
+def test_the_whole_message_cap_holds_in_utf16_units_for_emoji_text(notifier, build):
+    """Task, result or reason, agent names and a long history are all U+1F600. The message
+    that reaches `openclaw` is at most 1900 UTF-16 code units AND at most 1900 characters,
+    carries no lone surrogate (a cut must not split a pair), and still announces the history
+    it dropped."""
+    recs = build()
+    msg = _send_via_finalize(notifier, recs)
+
+    assert units(msg) <= 1900, f"{units(msg)} UTF-16 code units ({len(msg)} characters)"
+    assert len(msg) <= 1900
+    assert not LONE_SURROGATE.search(msg), "a lone surrogate reached the message"
+    assert msg.startswith(("\u2705", "\u274c", "\u26a0")), "the header must survive"
+    assert "   Task: " in msg and "   Hops: " in msg
+    assert re.search(r"\d+ more history line\(s\) omitted", msg), "no truncation marker"
+    dropped = int(re.search(r"(\d+) more history line", msg).group(1))
+    shown = sum(1 for l in msg.split("\n") if l.startswith("     - "))
+    assert dropped + shown == len(recs), "every history line is shown or counted"
+    assert shown >= 1
+    # The cap is a cap, not a target: the field caps are in characters, so an emoji-only
+    # message is mostly head, and what is left over is not wasted on a short history.
+    assert units(msg) > 1900 - 400, f"history was dropped far below the limit: {units(msg)}"
+
+
+def test_an_ordinary_message_is_exactly_what_it_was_before(notifier):
+    """The unit change must not touch a message that already fit: plain ASCII ledger text,
+    short history, no marker, byte for byte."""
+    recs = [{"at": "2026-01-01T00:00:00Z", "id": CID, "event": "create", "by": "main",
+             "to": "main", "task": "plain task"},
+            {"at": "2026-01-01T00:00:01Z", "id": CID, "event": "cancel", "by": "main",
+             "reason": "no longer needed"}]
+    msg = _send_via_finalize(notifier, recs)
+
+    lyra = "\u2728 LYRA (Main) [deepseek-v4-flash]"
+    assert msg == "\n".join([
+        f"\u274c [MIAB Bottle Cancelled] {CID}",
+        "   Task: plain task",
+        "   Reason: no longer needed",
+        "   Hops: 2",
+        "   History:",
+        f"     - \U0001f4e5 created by {lyra} -> {lyra}",
+        f"     - \u274c cancelled by {lyra} (no longer needed)",
+    ])
+
+
+# The same function, driven directly where the CLI cannot reach: exact boundaries, and the
+# last-resort cut, which no ledger can trigger while the per-field caps hold.
+
+def test_utf16_units_counts_what_a_receiver_counting_units_would(nb):
+    assert nb.utf16_units("") == 0
+    assert nb.utf16_units("abc") == 3
+    assert nb.utf16_units("\u00e9") == 1              # BMP, non-ASCII: still one unit
+    assert nb.utf16_units(EMOJI) == 2                  # outside the BMP: a surrogate pair
+    assert nb.utf16_units("a" + EMOJI * 3) == 7
+    for sample in ("", "plain", "caf\u00e9", EMOJI * 40, "mixed " + EMOJI + " text"):
+        assert nb.utf16_units(sample) == units(sample)
+        assert nb.utf16_units(sample) >= len(sample), "never less than the character count"
+
+
+def test_a_message_of_exactly_1900_units_fits_and_one_unit_more_does_not(nb):
+    line = EMOJI * 450                                  # 450 characters, 900 units
+    fits = nb._fit_report(["h" * 98], [line, line])     # 98 + 1 + 900 + 1 + 900 = 1900 units
+    assert units(fits) == 1900
+    assert fits == "\n".join(["h" * 98, line, line]), "a message that fits is returned as is"
+
+    over = nb._fit_report(["h" * 99], [line, line])     # 1901 units, though only 1001 characters
+    assert units(over) <= 1900
+    assert over == "\n".join(["h" * 99, line, nb._omitted_marker(1)])
+
+
+def test_the_room_kept_for_the_marker_is_measured_in_units_too(nb):
+    """Two of three 800-unit lines fit with the marker exactly to the limit; one unit more
+    of head and only one does."""
+    line = EMOJI * 400                                  # 800 units
+    marker = units(nb._omitted_marker(1))
+    head = 1900 - (1 + 800) * 2 - (1 + marker)          # head units that land on 1900 exactly
+
+    two = nb._fit_report(["h" * head], [line, line, line])
+    assert units(two) == 1900
+    assert two == "\n".join(["h" * head, line, line, nb._omitted_marker(1)])
+
+    one = nb._fit_report(["h" * (head + 1)], [line, line, line])
+    assert one == "\n".join(["h" * (head + 1), line, nb._omitted_marker(2)])
+    assert units(one) <= 1900
+
+
+@pytest.mark.parametrize("ascii_prefix", [0, 1, 2, 3])
+def test_the_last_resort_cut_trims_whole_code_points_until_the_message_fits(nb, ascii_prefix):
+    """A head that is itself over the limit (impossible through the CLI, which is why it is
+    driven here). The cut leaves the longest prefix that fits with "..." after it: whole
+    code points only, so no lone surrogate, whichever way the odd unit falls."""
+    head = "a" * ascii_prefix + EMOJI * 1200
+    out = nb._fit_report([head], ["first", "second"])
+
+    expected = "a" * ascii_prefix + EMOJI * ((1900 - 3 - ascii_prefix) // 2) + "..."
+    assert out == expected
+    assert units(out) <= 1900                          # also proves there is no lone surrogate
+    assert not LONE_SURROGATE.search(out)
+
+
+def test_the_last_resort_cut_still_drops_trailing_whitespace_before_the_ellipsis(nb):
+    out = nb._fit_report(["A" * 1893 + " " * 4 + "B" * 100], ["x"])
+    assert out == "A" * 1893 + "..."

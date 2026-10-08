@@ -52,7 +52,8 @@ Read this before upgrading a host that runs the notifier from cron.
 - **Messages look slightly different.** `@` and `<` in ledger text are followed by U+200B, `](` is
   split, control characters are gone, the bottle id and every reason are now capped and cleaned (the
   reasons were not before), and a long history ends with `... N more history line(s) omitted`. No
-  message exceeds 1900 characters.
+  message exceeds 1900 UTF-16 code units (so none exceeds 1900 characters either); a message heavy in
+  emoji, which count as two units, loses more history lines than its character count alone would cost.
 - **Small command changes.** `peek` now leaves out bottles already in `delivered_ids`, so it shows
   what `process` would send, and refuses a truncated ledger as `process` does. `status` gains
   `state_present`, `ledger_lines` and `ledger_head`. `on` checks `CLAW_CLOSED_TARGET` before it writes.
@@ -119,6 +120,21 @@ Read this before upgrading a host that runs the notifier from cron.
   send for the first, second and third bottle of a batch; the test reads the state left on disk, runs
   `process` again, and counts what was posted.
 
+- **The 1900 cap was counted in code points, not UTF-16 units** — from the review of this release's
+  code, not a scanner finding. `len()` counts code points, and an emoji is one code point but two UTF-16
+  code units: a bottle whose task, result, reason, agent names and history were all emoji came out at
+  1894 characters and 3382 units. If Discord or `openclaw` counts units, such a message would be
+  refused on every attempt, and the cursor would stay on that bottle. The whole-message limit is now
+  measured in UTF-16 code units (`utf16_units()`, never fewer than the code-point count, so it holds
+  under either count) everywhere `_fit_report()` enforces it: whether the message fits, the room kept
+  for the omitted-lines marker, and the last-resort cut, which trims whole code points so it cannot
+  leave a lone surrogate. The per-field caps (task 300, result 400, reason 300, names 64) stay in
+  characters, and a message that already fit with ordinary text is unchanged. Checked by
+  `tests/test_notifier_chat_text.py`: all-emoji resolved, cancelled and failed bottles through the
+  real send path, the exact 1900-unit boundary, and the last-resort cut driven directly, because no
+  ledger reaches it while the field caps hold. **Not verified: which way Discord or `openclaw` actually
+  counts.**
+
 ### Not addressed
 
 - **The log sink's cursor rewind.** `miab_observer.py` still resets a cursor beyond the ledger to 0.
@@ -134,7 +150,7 @@ Read this before upgrading a host that runs the notifier from cron.
   ledger order and nothing skips a bottle automatically; `process` now exits `1` on every run until
   the send works, which is how it gets noticed.
 - **Neutralisation is text-level and covers mentions and masked links only.** Bare URLs and other
-  markdown still render; length is counted in characters, not UTF-16 units.
+  markdown still render.
 
 ## 2.0.0 — "miab-observer"
 
