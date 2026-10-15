@@ -3,36 +3,33 @@
 
 Renders the closure message for every finished (resolve/cancel/fail) bottle in the
 ledger, exactly as the real notifier would post it, and prints them to stdout so you
-can review the format/result before anything goes to Discord.
+can review the format/result before anything goes to Discord. It imports the notifier
+module that sits beside it and calls the very functions the notifier calls, so what it
+prints is the neutralised, length-capped text -- mentions defused, one message at most
+1900 characters -- and not an approximation of it. It reads no state file and never runs
+`openclaw`.
 
 Usage:
   python3 notify_closed_dryrun.py                  # all finished bottles
   python3 notify_closed_dryrun.py <cid>            # just one bottle
   python3 notify_closed_dryrun.py --json           # machine-readable list
 """
-import importlib.util
 import json
 import sys
-from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-NOTIFIER = HERE / "notify_closed_bottles.py"
+# An ordinary import of the sibling module: Python puts this script's own directory first
+# on sys.path, so no path juggling or dynamic loading is needed.
+import notify_closed_bottles as nb
 
-spec = importlib.util.spec_from_file_location("notify", NOTIFIER)
-nb = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(nb)
 
 def all_finished():
     seen = set()
     out = []
-    for l in nb.load_all_lines():
-        try:
-            r = json.loads(l)
-        except Exception:
-            continue
-        if r.get("event") in nb.END_EVENTS and r.get("id") not in seen:
-            seen.add(r["id"])
-            out.append(r["id"])
+    for rec in nb.parse_records(nb.load_all_lines()):
+        cid = nb.end_bottle_id(rec)
+        if cid is not None and cid not in seen:
+            seen.add(cid)
+            out.append(cid)
     return out
 
 def main():
@@ -48,7 +45,7 @@ def main():
         return
     for r in results:
         print("=" * 60)
-        print(f"Bottle: {r['id']}")
+        print(f"Bottle: {nb.sanitize(r['id'], limit=nb.NAME_LIMIT)}")
         print("=" * 60)
         if r["message"]:
             print(r["message"])
